@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#161512">
+<meta name="mobile-web-app-capable" content="yes">
+<title>ClaudyBot</title>
+<link rel="icon" href="/pieces/wN.svg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header id="top">
+  <button id="home" class="brand" title="Overview"><img src="/pieces/wN.svg" alt=""><span>ClaudyBot</span></button>
+  <div id="who"><span id="dot" class="dot"></span><span id="user">connecting…</span></div>
+  <div id="chips"></div>
+  <div class="spacer"></div>
+  <button id="btn-pause" class="pill"></button>
+  <button id="btn-mm" class="pill"></button>
+</header>
+
+<main id="main">
+  <section id="overview">
+    <div id="cards"></div>
+    <div id="empty" class="empty" hidden>
+      <img src="/pieces/wN.svg" alt="">
+      <p>No games running.</p>
+      <p class="dim">Challenges are accepted automatically, or type <code>challenge &lt;user&gt; 3+2</code> below.</p>
+    </div>
+    <div id="lists">
+      <div class="panel"><h3>Challenge queue</h3><ul id="queue" class="rows"></ul></div>
+      <div class="panel"><h3>Recent games</h3><ul id="recent" class="rows"></ul></div>
+    </div>
+  </section>
+
+  <section id="detail" hidden>
+    <div id="d-left">
+      <div class="gamebar">
+        <button id="d-prev" class="icon" title="Previous game">&#9664;</button>
+        <div id="d-title"></div>
+        <button id="d-next" class="icon" title="Next game">&#9654;</button>
+      </div>
+      <div class="player top" id="d-ptop"><div class="name"></div><div class="clock"></div></div>
+      <div class="board-row">
+        <div class="evalbar" id="d-bar"><div class="fill"></div><span class="txt"></span></div>
+        <div class="board big" id="d-board"></div>
+      </div>
+      <div class="player bottom" id="d-pbot"><div class="name"></div><div class="clock"></div></div>
+      <div class="controls">
+        <button id="d-flip">Flip</button>
+        <button id="d-draw">Offer draw</button>
+        <button id="d-abort" class="warn">Abort</button>
+        <button id="d-resign" class="danger">Resign</button>
+        <a id="d-link" target="_blank" rel="noopener">Lichess ↗</a>
+      </div>
+    </div>
+    <div id="d-right">
+      <div class="panel" id="p-engine">
+        <h3>Engine <span id="d-engname" class="dim"></span></h3>
+        <div id="d-summary"></div>
+        <div class="tablewrap">
+          <table id="d-table">
+            <thead><tr><th>Depth</th><th>Score</th><th>Time</th><th>Nodes</th><th>NPS</th><th>Hash</th><th>TB</th><th class="pv">PV</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel" id="p-chart">
+        <h3>Eval history <span class="dim">White win %</span></h3>
+        <div class="chartwrap"><svg id="d-chart" viewBox="0 0 1000 200" preserveAspectRatio="none"></svg><div id="d-tip" hidden></div></div>
+      </div>
+      <div class="split">
+        <div class="panel" id="p-moves"><h3>Moves</h3><div id="d-moves"></div></div>
+        <div class="panel" id="p-chat">
+          <h3>Chat</h3>
+          <div id="d-chat"></div>
+          <form id="chat-form"><input id="chat-in" placeholder="say something" autocomplete="off"><button>Send</button></form>
+        </div>
+      </div>
+      <div class="panel" id="p-raw"><h3>Engine I/O</h3><pre id="d-raw"></pre></div>
+    </div>
+  </section>
+</main>
+
+<footer id="bottom">
+  <div id="log"></div>
+  <form id="cmd-form">
+    <span class="prompt">›</span>
+    <input id="cmd" list="cmds" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+           enterkeyhint="send" placeholder="command — type help">
+    <datalist id="cmds"></datalist>
+    <button type="button" id="log-toggle" class="pill">Log</button>
+  </form>
+</footer>
+<div id="offline" hidden>connection lost — retrying…</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+# ClaudyBot 안드로이드(Termux)용 설정. setup.sh가 처음 한 번 config.yml로 복사합니다.
+# 실행 중에도 `set <키> <값>`으로 바꿀 수 있고, `save`로 이 형식 그대로 config.yml에 저장됩니다.
+
+# 토큰(bot:play 권한). 셋 중 하나만 쓰면 됩니다. 파일/환경변수 쪽을 권장합니다.
+token: ""                 # 직접 입력
+token_file: token.txt     # setup.sh에서 입력한 토큰 (bot/token.txt)
+# 또는 환경변수 LICHESS_BOT_TOKEN
+
+url: https://lichess.org
+
+engine:
+  path: ../claudy         # setup.sh가 빌드한 ARM64 엔진
+  ponder: true            # 상대 차례에도 생각(ponderhit 지원)
+  first_move_ms: 3000     # 첫 수(시계가 아직 안 도는 수) 생각 시간
+  lag_compensation: true  # 매 수마다 실제 네트워크 지연을 재서 엔진 시간 계산에 반영
+  options:                # 새 게임부터 적용되는 UCI 옵션
+    Hash: 512             # MB, 게임마다 따로 잡힙니다
+    Threads: 4            # 게임당 스레드. Dimensity 9300+의 큰 코어(X4) 4개에 맞춤
+    Move Overhead: 150    # 기본 여유(ms). 실제 측정한 네트워크 지연은 여기에 자동으로 더해짐
+    SyzygyPath: ""        # 엔드게임 테이블베이스 폴더 (없으면 비워 둠)
+
+challenge:
+  accept: true            # false = 일시정지 (명령: pause / resume)
+  paused_action: decline  # 일시정지 중 신청 처리: decline(나중에 오라고 거절) | ignore(무응답)
+  concurrency: 1          # 동시 게임 수 (명령: limit 2). 태블릿은 1이 가장 강함
+  queue_size: 4           # 자리가 없을 때 대기열에 둘 신청 수
+  variants: [standard]    # standard, fromPosition
+  speeds: [bullet, blitz, rapid, classical]
+  modes: [rated, casual]
+  min_base: 0             # 기본 시간(초) 범위 (명령: tc 60-900 0-10)
+  max_base: 3600
+  min_inc: 0              # 증가 시간(초) 범위
+  max_inc: 180
+  bot_bullet_needs_inc: false   # 봇과의 불릿은 증가 시간이 있을 때만
+  accept_bots: true
+  accept_humans: true
+  min_rating: 0
+  max_rating: 4000
+  max_per_opponent: 1     # 같은 상대와 동시에 둘 수 있는 게임 수
+  allow_list: []          # 비어 있지 않으면 이 사람들만 받음
+  block_list: []          # 명령: block <user> / unblock <user>
+  sort: first             # 대기열 순서: first(먼저 온 순) | best(레이팅 높은 순)
+
+matchmaking:              # 한가할 때 온라인 봇에게 먼저 신청 (명령: match on/off/now)
+  enabled: false
+  idle_seconds: 90
+  tc: ["3+2", "5+3", "1+1"]
+  rated: true
+  min_rating: 1800
+  max_rating: 3500
+  timeout_seconds: 45     # 응답이 없으면 신청 취소
+  block_list: []
+
+game:
+  abort_seconds: 30       # 상대가 첫 수를 안 두면 중단(abort)
+  claim_victory: true     # 상대가 나가면 승리 청구
+  resign_enabled: false   # 평가가 resign_score 이하로 resign_moves수 연속이면 기권
+  resign_score: -1000
+  resign_moves: 5
+  draw_accept: true       # 상대 무승부 제안 수락 조건: 내 평가 <= draw_accept_score (또는 6개 이하 기물의 0점 국면)
+  draw_accept_score: -30
+  draw_offer: false       # |평가| <= draw_offer_score가 draw_offer_moves수 연속이면 무승부 제안
+  draw_offer_score: 8
+  draw_offer_moves: 10
+  draw_offer_min_ply: 80
+  greeting: "Hi {opponent}! I'm {me}, running {engine}. Good luck! Type !help for commands."   # {engine} = the engine's UCI name
+  greeting_spectators: "Hi! I'm {me}, running {engine}. Type !eval to see my evaluation."
+  goodbye: "Good game, {opponent}!"
+  chat_commands: true     # !help !eval !name (관전 채팅에서만 !eval 공개)
+  pgn_dir: games          # 끝난 게임을 날짜별 PGN으로 저장 (엔진 평가/깊이 주석 포함)
+
+strength:                 # 레이팅 제한 게임: 상대가 첫 수 전에 채팅에 "!diff 1500" (엔진이 그 레이팅으로 둠)
+  accept: true            # 요청 받기
+  modes: casual           # casual | rated | both
+  opponents: human        # human | bot | both
+  min: 100
+  max: 3400               # 3400 = 최대 실력
+  step: 1                 # 제공 레벨 간격 (1 = 모든 레이팅)
+  announce: true          # 조건이 맞는 게임 시작 때 안내
+
+ui:
+  pieces: sprites         # Termux는 그림(Sixel)을 못 띄움 → 콘솔은 픽셀 기물, Caliente 그림은 브라우저에서
+  piece_set: caliente     # bot/assets 안의 기물 세트 폴더
+  cell_aspect: 2.12       # 글자 칸 세로/가로 비율 (image 모드 보드가 정사각형이 되도록)
+  refresh_ms: 250
+
+web:                      # 브라우저 대시보드 (실행 옵션 --web 으로도 켤 수 있음)
+  enabled: true
+  host: 127.0.0.1         # 0.0.0.0 = 같은 와이파이의 다른 기기에서도 접속 (접속 키가 자동으로 붙음)
+  port: 8080
+  key: ""                 # 네트워크 접속용 키. 비워 두면 실행할 때마다 새로 만듦
+
+log:
+  file: logs/claudybot.log
+  level: info             # debug | info | warning

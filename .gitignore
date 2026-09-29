@@ -1,0 +1,8 @@
+# local settings and secrets
+config.yml
+token.txt
+# runtime output
+logs/
+games/
+__pycache__/
+*.pyc

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#161512">
+<title>ClaudyBot Live</title>
+<meta name="description" content="Read-only live view of a Lichess BOT run by ClaudyBot: boards, clocks, moves and (optionally) engine output.">
+<link rel="icon" href="pieces/wN.svg">
+<link rel="stylesheet" href="viewer.css">
+<script src="config.js"></script>
+</head>
+<body>
+<header id="top">
+  <a id="home" class="brand" href="#"><img src="pieces/wN.svg" alt=""><span>ClaudyBot Live</span></a>
+  <a id="who" target="_blank" rel="noopener"><span id="dot" class="dot"></span><span id="user">…</span></a>
+  <div id="chips"></div>
+  <div class="spacer"></div>
+  <span id="tele" class="pill" title="engine telemetry from the bot"></span>
+</header>
+
+<main id="main">
+  <section id="overview">
+    <div id="cards"></div>
+    <div id="empty" class="empty" hidden>
+      <img src="pieces/wN.svg" alt="">
+      <p id="empty-text">No game in progress.</p>
+      <p class="dim">New games appear here automatically.</p>
+    </div>
+    <div id="lists">
+      <div class="panel"><h3>Recent games</h3><ul id="recent" class="rows"></ul></div>
+      <div class="panel"><h3>About</h3>
+        <p class="dim small" id="about">Read-only mirror. Boards, clocks and moves come live from the public Lichess API;
+          engine output appears when the bot publishes its telemetry.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="detail" hidden>
+    <div id="d-left">
+      <div class="gamebar">
+        <button id="d-back" class="icon" title="Back">&#9664;</button>
+        <div id="d-title"></div>
+        <a id="d-link" class="icon" target="_blank" rel="noopener" title="Open on Lichess">&#8599;</a>
+      </div>
+      <div class="player top" id="d-ptop"><div class="name"></div><div class="clock"></div></div>
+      <div class="board-row">
+        <div class="evalbar" id="d-bar"><div class="fill"></div><span class="txt"></span></div>
+        <div class="board big" id="d-board"></div>
+      </div>
+      <div class="player bottom" id="d-pbot"><div class="name"></div><div class="clock"></div></div>
+      <div class="controls"><button id="d-flip">Flip</button></div>
+    </div>
+    <div id="d-right">
+      <div class="panel" id="p-engine">
+        <h3>Engine <span id="d-engname" class="dim"></span></h3>
+        <div id="d-summary"></div>
+        <div class="tablewrap" id="d-tablewrap">
+          <table id="d-table">
+            <thead><tr><th>Depth</th><th>Score</th><th>Time</th><th>Nodes</th><th>NPS</th><th>Hash</th><th class="pv">PV</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel" id="p-chart">
+        <h3>Eval history <span class="dim">White win %</span></h3>
+        <div class="chartwrap"><svg id="d-chart" viewBox="0 0 1000 200" preserveAspectRatio="none"></svg><div id="d-tip" hidden></div></div>
+      </div>
+      <div class="panel" id="p-moves"><h3>Moves</h3><div id="d-moves"></div></div>
+    </div>
+  </section>
+</main>
+<footer id="foot">
+  <span class="dim">Live data: <a href="https://lichess.org/api" target="_blank" rel="noopener">Lichess API</a> ·
+  pieces: Caliente by avi (CC BY-NC-SA 4.0) · <a href="https://github.com/eple12/ClaudyBot" target="_blank" rel="noopener">ClaudyBot</a></span>
+</footer>
+<div id="offline" hidden>connection lost — retrying…</div>
+<script type="module" src="viewer.js"></script>
+</body>
+</html>
