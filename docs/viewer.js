@@ -319,10 +319,11 @@ async function loadLastGame() {
 // (Unauthenticated GitHub API: 60 requests / hour per viewer, so look it up rarely.)
 let gistCheckedAt = -1e9;
 async function resolveTelemetry() {
-  if (!TELE_GIST || performance.now() - gistCheckedAt < 120000) return;
+  if (!TELE_GIST || performance.now() - gistCheckedAt < 60000) return;
   gistCheckedAt = performance.now();
   try {
-    const g = await fetch(`https://api.github.com/gists/${TELE_GIST}`, { cache: "no-store" }).then(r => r.json());
+    const g = await fetch(`https://api.github.com/gists/${TELE_GIST}`,
+      { cache: "no-store", signal: AbortSignal.timeout(10000) }).then(r => r.json());
     const f = g.files && g.files["telemetry.json"];
     const d = f ? JSON.parse(f.content) : {};
     TELE = (d.telemetry || "").replace(/\/+$/, "");
@@ -336,7 +337,8 @@ async function pollTelemetry() {
     if (!TELE || fails >= 3) { await resolveTelemetry(); fails = 0; }
     if (TELE) {
       try {
-        const r = await fetch(`${TELE}/api/public/state`, { cache: "no-store" });
+        // a tunnel that went away can leave a request hanging: give up after a few seconds
+        const r = await fetch(`${TELE}/api/public/state`, { cache: "no-store", signal: AbortSignal.timeout(6000) });
         if (!r.ok) throw new Error(r.status);
         tele = await r.json(); teleAt = performance.now(); teleOk = true; fails = 0;
       } catch { teleOk = false; fails++; }
