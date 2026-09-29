@@ -179,6 +179,25 @@ Caliente 기물: avi 제작(https://github.com/avi-0/caliente), lichess 배포�
   뷰어를 `?telemetry=https://<터널 주소>`로 열거나 `docs/config.js`의 `telemetry`에 적으면 엔진 패널이 켜집니다.
   공개 주소가 없으면 뷰어는 보드·시계·수순만 보여 줍니다.
 
+### 터널 자동 연결 (Cloudflare 임시 터널)
+
+```yaml
+web:
+  public_port: 8081       # 읽기 전용 포트: /api/public/state 말고는 전부 404
+  tunnel: true
+  tunnel_exe: C:/tools/cloudflared.exe
+  tunnel_gist: <gist id>  # docs/config.js 의 telemetryGist 와 같게
+```
+
+봇이 시작하면 `cloudflared tunnel --url http://127.0.0.1:8081`로 `https://<무작위>.trycloudflare.com` 주소를 받고
+(Cloudflare 계정 불필요), 그 주소를 GitHub CLI(`gh`, gist 권한으로 로그인)로 gist의 `telemetry.json`에 적습니다.
+뷰어는 그 gist에서 주소를 찾아 엔진 정보를 받아 옵니다. 봇을 끝내면 터널을 닫고 gist를 비웁니다.
+봇이 강제로 종료돼 남은 터널은 다음 실행 때 정리합니다(`logs/cloudflared.pid`).
+
+* 터널에 연결되는 것은 읽기 전용 포트뿐이라 대시보드(`web.port`)와 명령은 인터넷에서 닿지 않습니다.
+* 임시 터널 주소는 실행할 때마다 바뀌고 가용성 보장이 없습니다. Cloudflare에 도메인이 있다면 이름 있는 터널로
+  고정 주소를 만들고 `docs/config.js`의 `telemetry`에 그 주소를 적으면 됩니다(gist 불필요).
+
 ## 파일
 
 | 파일 | 역할 |

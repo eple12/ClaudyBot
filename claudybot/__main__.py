@@ -135,11 +135,11 @@ def main() -> int:
     from .manager import BotManager
 
     def attach_web(mgr) -> None:
-        if a.web is None and not cfg.get("web.enabled"):
+        if a.web is None and not cfg.get("web.enabled") and not int(cfg.get("web.public_port") or 0):
             return
         from .web import WebServer
         mgr.web = WebServer(mgr, a.web_host or cfg.get("web.host"), a.web or int(cfg.get("web.port")),
-                            str(cfg.get("web.key") or ""))
+                            str(cfg.get("web.key") or ""), int(cfg.get("web.public_port") or 0))
 
     if a.headless:
         try:
@@ -152,6 +152,9 @@ def main() -> int:
             asyncio.run(run_headless(mgr))
         except KeyboardInterrupt:
             pass
+        finally:
+            if mgr.tunnel is not None:
+                mgr.tunnel.kill_now()
         return 0 if not mgr.fatal else 1
 
     from .tui import ClaudyApp
@@ -164,7 +167,9 @@ def main() -> int:
     try:
         app.run()
     finally:
-        # never leave engine processes behind
+        # never leave engine / tunnel processes behind
+        if mgr.tunnel is not None:
+            mgr.tunnel.kill_now()
         for g in list(mgr.games.values()):
             if g.engine and g.engine.proc and g.engine.proc.returncode is None:
                 try:

@@ -97,6 +97,10 @@ DEFAULTS: dict[str, Any] = {
         "port": 8080,
         "key": "",                    # access key for network use; generated at start when empty
         "public": False,              # serve /api/public/state (read-only, any origin) for a mirror page
+        "public_port": 0,             # >0: separate listener with only /api/public/state (safe to put behind a tunnel)
+        "tunnel": False,              # start a Cloudflare quick tunnel to public_port (needs cloudflared)
+        "tunnel_exe": "cloudflared",  # path of cloudflared(.exe)
+        "tunnel_gist": "",            # gist id where the tunnel address is published for the viewer (needs gh)
     },
     "log": {
         "file": "logs/claudybot.log",

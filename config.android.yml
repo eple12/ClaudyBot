@@ -89,6 +89,11 @@ web:                      # 브라우저 대시보드 (실행 옵션 --web 으�
   host: 127.0.0.1         # 0.0.0.0 = 같은 와이파이의 다른 기기에서도 접속 (접속 키가 자동으로 붙음)
   port: 8080
   key: ""                 # 네트워크 접속용 키. 비워 두면 실행할 때마다 새로 만듦
+  public: false           # 대시보드 포트에서도 /api/public/state 제공 (보통은 아래 public_port를 씀)
+  public_port: 0          # >0: 읽기 전용 /api/public/state 만 여는 별도 포트 (터널은 여기에 연결)
+  tunnel: false           # 봇 시작 때 Cloudflare 임시 터널(cloudflared)을 public_port에 연결
+  tunnel_exe: cloudflared # cloudflared 실행 파일 경로
+  tunnel_gist: ""         # 터널 주소를 올릴 gist id (GitHub CLI gh 로그인 필요) - 뷰어 config.js의 telemetryGist
 
 log:
   file: logs/claudybot.log

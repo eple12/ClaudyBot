@@ -67,6 +67,8 @@ class BotManager:
         self.fatal: str | None = None
         self.tasks: list[asyncio.Task] = []
         self.web = None                             # WebServer (browser dashboard), see web.py
+        self.tunnel = None                          # Tunnel (public telemetry), see tunnel.py
+        self._tunnel_task: asyncio.Task | None = None
         self.lag = LagTracker()                     # network lag per move, shared by all games
 
     # ---- logging -------------------------------------------------------------
@@ -107,6 +109,11 @@ class BotManager:
                 await self.web.start()
             except OSError as e:
                 self.log("error", f"web dashboard: cannot listen on {self.web.host}:{self.web.port} ({e.strerror or e})")
+            if self.web.pub_server and self.cfg.get("web.tunnel") and self.tunnel is None:
+                from .tunnel import Tunnel
+                self.tunnel = Tunnel(self, int(self.cfg.get("web.public_port")), str(self.cfg.get("web.tunnel_exe")),
+                                     str(self.cfg.get("web.tunnel_gist") or ""))
+                self._tunnel_task = asyncio.create_task(self.tunnel.start(), name="tunnel")
         try:
             acct = await self.li.account()
         except LichessError as e:
@@ -158,6 +165,10 @@ class BotManager:
             if g.engine:
                 await g.engine.quit()
         await self.li.close()
+        if self.tunnel is not None:
+            if self._tunnel_task and not self._tunnel_task.done():
+                self._tunnel_task.cancel()
+            await self.tunnel.stop()
         if self.web is not None:
             await self.web.stop()
 

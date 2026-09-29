@@ -174,8 +174,11 @@ class _RequestUI(UI):
 
 
 class WebServer:
-    def __init__(self, mgr: "BotManager", host: str = "127.0.0.1", port: int = 8080, key: str = ""):
+    def __init__(self, mgr: "BotManager", host: str = "127.0.0.1", port: int = 8080, key: str = "",
+                 public_port: int = 0):
         self.mgr = mgr
+        self.public_port = public_port   # extra listener that serves nothing but /api/public/state (for a tunnel)
+        self.pub_server: asyncio.base_events.Server | None = None
         self.host = host
         self.port = port
         self.loopback = host in ("127.0.0.1", "localhost", "::1")
@@ -192,17 +195,23 @@ class WebServer:
         self.server = await asyncio.start_server(self._client, self.host, self.port)
         where = self.url if self.loopback else f"{self.url}  (network: use this machine's address)"
         self.mgr.log("info", f"web dashboard: {where}")
+        if self.public_port:
+            self.pub_server = await asyncio.start_server(
+                lambda r, w: self._client(r, w, public_only=True), "127.0.0.1", self.public_port)
+            self.mgr.log("info", f"public telemetry (read-only): http://127.0.0.1:{self.public_port}/api/public/state")
 
     async def stop(self) -> None:
-        if self.server:
-            self.server.close()
-            try:
-                await asyncio.wait_for(self.server.wait_closed(), 2)
-            except (asyncio.TimeoutError, Exception):
-                pass
+        for srv in (self.server, self.pub_server):
+            if srv:
+                srv.close()
+                try:
+                    await asyncio.wait_for(srv.wait_closed(), 2)
+                except (asyncio.TimeoutError, Exception):
+                    pass
 
     # ---- HTTP plumbing ----------------------------------------------------------------------
-    async def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    async def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+                      public_only: bool = False) -> None:
         try:
             while True:
                 line = await asyncio.wait_for(reader.readline(), 60)
@@ -226,8 +235,8 @@ class WebServer:
                 body = await reader.readexactly(n) if n else b""
                 cors = False
                 try:
-                    if target.startswith("/api/public/"):
-                        status, ctype, data, cache = self._public(method, target)
+                    if public_only or target.startswith("/api/public/"):
+                        status, ctype, data, cache = self._public(method, target, force=public_only)
                         cors = True
                     else:
                         status, ctype, data, cache = await self._route(method, target, headers, body)
@@ -328,11 +337,11 @@ class WebServer:
         return 404, "text/plain", b"not found", False
 
     # ---- public read-only telemetry (web.public) --------------------------------------------------
-    def _public(self, method: str, target: str):
+    def _public(self, method: str, target: str, force: bool = False):
         """GET /api/public/state: every running game with its engine output, for a read-only mirror page
         (e.g. the GitHub Pages viewer reached through a tunnel). No commands, no log, no chat, no raw I/O,
         open to any origin; only when web.public is on."""
-        if not self.mgr.cfg.get("web.public"):
+        if not (force or self.mgr.cfg.get("web.public")):
             return 404, "text/plain", b"not found", False
         if method != "GET" or urlsplit(target).path != "/api/public/state":
             return 404, "text/plain", b"not found", False

@@ -15,7 +15,8 @@ const qs = new URLSearchParams(location.search);
 const CFG = window.VIEWER || {};
 const BOT = (qs.get("bot") || CFG.bot || "ClaudyEngine").trim();
 const BOT_ID = BOT.toLowerCase();
-const TELE = (qs.get("telemetry") ?? CFG.telemetry ?? "").trim().replace(/\/+$/, "");
+let TELE = (qs.get("telemetry") ?? CFG.telemetry ?? "").trim().replace(/\/+$/, "");
+const TELE_GIST = TELE ? "" : (qs.get("gist") ?? CFG.telemetryGist ?? "").trim();
 const LI = "https://lichess.org";
 
 // ---- helpers --------------------------------------------------------------------------------------
@@ -314,18 +315,38 @@ async function loadLastGame() {
 }
 
 // ---- telemetry (optional) ----------------------------------------------------------------------
+// The bot's tunnel address changes whenever it restarts; it publishes the current one to a gist.
+// (Unauthenticated GitHub API: 60 requests / hour per viewer, so look it up rarely.)
+let gistCheckedAt = -1e9;
+async function resolveTelemetry() {
+  if (!TELE_GIST || performance.now() - gistCheckedAt < 120000) return;
+  gistCheckedAt = performance.now();
+  try {
+    const g = await fetch(`https://api.github.com/gists/${TELE_GIST}`, { cache: "no-store" }).then(r => r.json());
+    const f = g.files && g.files["telemetry.json"];
+    const d = f ? JSON.parse(f.content) : {};
+    TELE = (d.telemetry || "").replace(/\/+$/, "");
+  } catch { /* keep the previous address */ }
+}
+
 async function pollTelemetry() {
-  if (!TELE) { renderTele(); return; }
+  if (!TELE && !TELE_GIST) { renderTele(); return; }
+  let fails = 0;
   for (;;) {
-    try {
-      const r = await fetch(`${TELE}/api/public/state`, { cache: "no-store" });
-      if (!r.ok) throw new Error(r.status);
-      tele = await r.json(); teleAt = performance.now(); teleOk = true;
-    } catch { teleOk = false; }
+    if (!TELE || fails >= 3) { await resolveTelemetry(); fails = 0; }
+    if (TELE) {
+      try {
+        const r = await fetch(`${TELE}/api/public/state`, { cache: "no-store" });
+        if (!r.ok) throw new Error(r.status);
+        tele = await r.json(); teleAt = performance.now(); teleOk = true; fails = 0;
+      } catch { teleOk = false; fails++; }
+    } else {
+      teleOk = false;
+    }
     syncTeleGames();
     renderTele();
     render();
-    await sleep(document.hidden ? 8000 : 1500);
+    await sleep(!TELE ? 30000 : document.hidden ? 8000 : 1500);
   }
 }
 const teleGames = new Map();
@@ -653,7 +674,7 @@ function renderHeader() {
 }
 function renderTele() {
   const p = $("#tele");
-  if (!TELE) { p.hidden = true; return; }
+  if (!TELE && !TELE_GIST) { p.hidden = true; return; }
   p.hidden = false;
   setText(p, teleOk ? "engine live" : "engine offline");
   setClass(p, "on", teleOk);
