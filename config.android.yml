@@ -77,6 +77,19 @@ link:                     # 도전 링크 기본값 (명령: link 5+3 casual 48h
   color: random            # 봇의 색: random | white | black
   hours: 24                # 링크가 열려 있는 시간 (최대 336 = 2주)
 
+local:                    # 이 기기에서 엔진과 대국 (명령: play, 대시보드 Play the engine) - 인터넷 없이도 됨
+  name: You
+  tc: "10+5"               # 또는 untimed
+  color: random            # 내 색
+  elo: 1500                # 엔진 레벨 (0 = 최대 실력)
+  movetime_ms: 2000        # untimed 게임에서 엔진의 수당 시간
+
+analysis:                 # 분석 보드 (명령: analyze / F8, 대시보드 Analysis)
+  multipv: 3               # 후보 수순 개수
+  threads: 0               # 0 = engine.options.Threads
+  hash: 0                  # MB, 0 = engine.options.Hash
+  game_ms: 1000            # 전체 게임 분석 때 국면당 시간
+
 strength:                 # 레이팅 제한 게임: 상대가 첫 수 전에 채팅에 "!diff 1500" (엔진이 그 레이팅으로 둠)
   accept: true            # 요청 받기
   modes: casual           # casual | rated | both
