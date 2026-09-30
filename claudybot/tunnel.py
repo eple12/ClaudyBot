@@ -143,5 +143,26 @@ class Tunnel:
         if self._drain:
             self._drain.cancel()
         self._pidfile().unlink(missing_ok=True)
-        if self.gist and self.url:
+        # clear the address only if it is still ours: another bot (PC / tablet) may have taken over the gist
+        if self.gist and self.url and await self.published() in (self.url, None):
             await self.publish("")
+
+    async def published(self) -> str | None:
+        """The address currently in the gist ('' when cleared, None when it cannot be read)."""
+        gh = shutil.which("gh")
+        if not gh:
+            return None
+        proc = await asyncio.create_subprocess_exec(
+            gh, "api", f"gists/{self.gist}", "--jq", '.files["telemetry.json"].content',
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), 20)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return None
+        if proc.returncode:
+            return None
+        try:
+            return str(json.loads(out.decode() or "{}").get("telemetry") or "")
+        except ValueError:
+            return None

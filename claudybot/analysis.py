@@ -71,6 +71,11 @@ class Analysis:
         self._idle_task: asyncio.Task | None = None
 
     # ---- position ---------------------------------------------------------------------------------
+    def _position(self, n: int) -> str:
+        """UCI position after n plies, with the moves (so the engine sees repetitions)."""
+        moves = " ".join(m.uci() for m in self.moves[:n])
+        return f"position fen {self.start.fen()}" + (f" moves {moves}" if moves else "")
+
     def board_at(self, n: int) -> chess.Board:
         b = self.start.copy(stack=False)
         for mv in self.moves[:n]:
@@ -269,7 +274,7 @@ class Analysis:
                         info["white_cp"] = _white_cp(info, turn)
                         self.lines[info.get("multipv", 1)] = info
 
-                await eng.go(f"position fen {b.fen()}", "go infinite", on_info)
+                await eng.go(self._position(self.cursor), "go infinite", on_info)
                 self.searching_key = key
                 self.error = self.error if "MultiPV" in self.error else ""
             except (EngineError, OSError, asyncio.TimeoutError) as e:
@@ -304,10 +309,15 @@ class Analysis:
                 await self._stop_locked()
                 eng = await self._engine()
                 await eng.setoption("MultiPV", 1)
-                b = self.start.copy(stack=False)
-                for i in range(len(self.moves) + 1):
-                    if i:
-                        b.push(self.moves[i - 1])
+                boards = [self.start.copy(stack=False)]
+                for mv in self.moves:
+                    nb = boards[-1].copy(stack=False)
+                    nb.push(mv)
+                    boards.append(nb)
+                # last position first, as Lichess' fishnet does: the hash table then already knows how the
+                # game went on when the earlier positions are searched (sharper, more consistent evaluations)
+                for i in range(len(self.moves), -1, -1):
+                    b = boards[i]
                     out = b.outcome(claim_draw=False)
                     if out is not None:
                         cp = 0 if out.winner is None else (MATE_CP if out.winner == chess.WHITE else -MATE_CP)
@@ -320,14 +330,14 @@ class Analysis:
                                 last.clear()
                                 last.update(info)
 
-                        await eng.go(f"position fen {b.fen()}", f"go movetime {ms}", on_info)
+                        await eng.go(self._position(i), f"go movetime {ms}", on_info)
                         best, _ = await eng.wait_bestmove(timeout=ms / 1000 + 30)
                         try:
                             san = b.san(chess.Move.from_uci(best))
                         except (ValueError, AssertionError):
                             san = best
                         self.evals[i] = {"cp": _white_cp(last, b.turn), "best": san, "depth": last.get("depth", 0)}
-                    self.pass_done = i + 1
+                    self.pass_done += 1
                     self.version += 1
         except asyncio.CancelledError:
             if self.engine is not None and self.engine.searching:
@@ -424,7 +434,9 @@ class Analysis:
             "live": {"depth": self.live.get("depth"), "nodes": self.live.get("nodes", 0), "nps": self.live.get("nps", 0),
                      "time": self.live.get("time", 0)},
             "eval": _clip(top), "eval_text": fmt_score(top), "win": round(_win(top), 1) if top is not None else None,
-            "evals": [{"ply": i, "cp": _clip(e["cp"]), "text": fmt_score(e["cp"]), "best": e["best"],
+            "evals": [{"ply": i, "cp": _clip(e["cp"]), "best": e["best"],
+                       "text": ("1-0" if e["cp"] > 0 else "0-1") if e["cp"] is not None and abs(e["cp"]) == MATE_CP
+                       else fmt_score(e["cp"]),
                        "mark": marks.get(i - 1, "")} for i, e in sorted(self.evals.items())],
             "marks": {str(k): v for k, v in marks.items()},
             "pass": {"done": self.pass_done, "total": self.pass_total, "running": self._pass_running()},

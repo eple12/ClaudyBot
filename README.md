@@ -204,7 +204,8 @@ rated 링크는 로그인한 사람만 들어올 수 있습니다. `link 5+3 150
 * 보드에서 수를 두거나(양쪽 모두) 콘솔에 치면 새 수순을 따라가고, ◀ ▶ / ← → / F3 F4로 앞뒤로 움직입니다.
 * FEN이나 PGN을 붙여 넣어 불러오고(`analyze fen …`, `analyze pgn 파일`), 봇의 게임은 *Analyze* 버튼이나
   `analyze game <n>`으로 엽니다. 로컬 대국 화면의 국면에서 *Play from here*로 바로 대국을 시작할 수도 있습니다.
-* *Analyze whole game*(`an game 1s`)은 모든 국면을 평가해 그래프를 그리고, 승률을 크게 잃은 수에
+* *Analyze whole game*(`an game 1s`)은 모든 국면을 **마지막 국면부터 거꾸로** 평가해(리체스 fishnet과 같은 순서:
+  뒤의 수읽기가 해시 테이블에 남아 앞 국면 평가가 더 정확해짐) 그래프를 그리고, 승률을 크게 잃은 수에
   `?!`(5%p 이상) `?`(10%p) `??`(15%p)를 붙입니다(리체스와 같은 기준).
 * 분석 엔진은 대국 엔진과 별도 프로세스입니다(`analysis.threads`, `analysis.hash`, 0이면 `engine.options`의 값).
   아무도 분석 화면을 보고 있지 않으면 20초 뒤 멈춥니다.
@@ -276,9 +277,12 @@ web:
 
 봇이 시작하면 `cloudflared tunnel --url http://127.0.0.1:8081`로 `https://<무작위>.trycloudflare.com` 주소를 받고
 (Cloudflare 계정 불필요), 그 주소를 GitHub CLI(`gh`, gist 권한으로 로그인)로 gist의 `telemetry.json`에 적습니다.
-뷰어는 그 gist에서 주소를 찾아 엔진 정보를 받아 옵니다. 봇을 끝내면 터널을 닫고 gist를 비웁니다.
+뷰어는 그 gist에서 주소를 찾아 엔진 정보를 받아 옵니다. 봇을 끝내면 터널을 닫고, gist의 주소가 아직 자기 것일
+때만 비웁니다(다른 기기의 봇이 이어받았으면 그대로 둠).
 봇이 강제로 종료돼 남은 터널은 다음 실행 때 정리합니다(`logs/cloudflared.pid`).
 
+* 안드로이드(Termux)에서는 `bash ~/claudy/android/viewer.sh` 한 번이면 cloudflared·gh 설치, GitHub 로그인 안내,
+  이 설정까지 해 줍니다.
 * 터널에 연결되는 것은 읽기 전용 포트뿐이라 대시보드(`web.port`)와 명령은 인터넷에서 닿지 않습니다.
 * 임시 터널 주소는 실행할 때마다 바뀌고 가용성 보장이 없습니다. Cloudflare에 도메인이 있다면 이름 있는 터널로
   고정 주소를 만들고 `docs/config.js`의 `telemetry`에 그 주소를 적으면 됩니다(gist 불필요).
