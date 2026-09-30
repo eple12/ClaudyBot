@@ -4,7 +4,9 @@ A Lichess BOT client for **any UCI engine**, with a console dashboard (Textual) 
 live boards of all games (Caliente pieces), per-game engine table / eval history / raw UCI I/O, runtime
 commands (pause, challenge filters, matchmaking, resign / draw, chat), pondering, network-lag compensation,
 rating-limited games on request (`!diff <rating>`), separate game slots for bots and humans, long-lived
-"challenge a friend" links (`link 5+3`), PGN export, and an offline mock Lichess server.
+"challenge a friend" links (`link 5+3 1500`), games against the engine and an analysis board (MultiPV lines,
+whole-game review) on the device itself - also without internet (`--offline`), PGN export, and an offline mock
+Lichess server.
 
 * Live read-only mirror (GitHub Pages): <https://eple12.github.io/ClaudyBot/> — see *Live viewer* below.
 * Written for the [Claudy](https://github.com/eple12/ClaudyEngine) engine, but nothing in it is Claudy-specific:
@@ -71,7 +73,7 @@ demo.bat                             & rem 토큰 없이 가짜 Lichess 서버�
 * **맨 아래**: 이벤트 로그와 명령 입력줄. 명령 이름은 자동 완성되고, ↑/↓로 이전 명령을 불러옵니다.
 
 단축키: F1 도움말 · F2/Esc 개요 · F3/F4 이전/다음 게임 · F5 신청 일시정지/재개 · F6 보드 뒤집기 ·
-F7 도전 링크(기본값이 채워진 `link` 명령을 입력줄에 넣음, 고쳐서 Enter) ·
+F7 도전 링크(기본값이 채워진 `link` 명령을 입력줄에 넣음, 고쳐서 Enter) · F8 분석 보드 ·
 Ctrl+Q 종료(게임이 진행 중이면 3초 안에 한 번 더 누르기)
 
 ## 브라우저 대시보드 (`--web`)
@@ -114,6 +116,10 @@ Ctrl+Q 종료(게임이 진행 중이면 3초 안에 한 번 더 누르기)
 | `set <키> <값>` / `config [접두어]` / `save` | 아무 설정이나 변경 / 보기 / config.yml에 저장 |
 | `quit` / `quit now` | 진행 중인 게임을 다 끝낸 뒤 종료 / 즉시 종료 |
 | `restart` / `restart now` | `quit`과 같지만 종료 코드 75로 끝냄. 안드로이드 `run.sh`는 이때 업데이트 후 다시 시작 |
+| `play [white\|black\|random] [10+5\|untimed\|3s] [1500\|full] [fen <FEN>]` | 이 기기에서 엔진과 대국 (아래 참고) |
+| `e4`, `Nf3`, `O-O`, `e7e8q` / `takeback` | 로컬 대국에서 내 수 / 무르기 (분석 보드에서는 그 수를 둬 봄) |
+| `analyze [new\|fen <FEN>\|pgn <파일>\|game <n\|id>]` (`an`) | 분석 보드 열기 / 새 국면 / FEN·PGN 불러오기 / 봇 게임 불러오기 |
+| `an back\|next\|first\|last\|goto <n>`, `an lines 3`, `an on\|off`, `an game [1s]`, `an fen\|pgn` | 분석 보드 이동, 후보 수 개수, 엔진 켜고 끄기, 전체 게임 분석, FEN/PGN 복사 |
 
 예시: `set challenge.min_rating 1800`, `set engine.options.Threads 6` (새 게임부터 적용),
 `set game.resign_enabled on`, `config matchmaking`.
@@ -139,7 +145,9 @@ Ctrl+Q 종료(게임이 진행 중이면 3초 안에 한 번 더 누르기)
 `link 5+3`(또는 대시보드의 **Create link**, 콘솔의 F7)을 쓰면 `https://lichess.org/xxxxxxxx` 링크가 만들어지고,
 그 링크를 처음 여는 사람이 봇과 대국합니다. 리체스 웹에서 만든 친구 도전은 만든 사람의 창이 닫히면 곧
 사라지지만, 이 링크는 **정한 시간 동안 계속 열려 있습니다**(`link.hours`, 기본 24시간, 최대 2주).
-rated 링크는 로그인한 사람만 들어올 수 있습니다.
+rated 링크는 로그인한 사람만 들어올 수 있습니다. `link 5+3 1500`처럼 레이팅을 붙이면 그 링크로 시작된 게임은
+처음부터 그 레이팅으로 둡니다. **익명 상대도 이렇게 약하게 둘 수 있습니다**(아래 `!diff` 참고).
+대시보드에서는 링크 칸의 레벨 선택으로 정합니다.
 
 * 원리: 리체스의 open challenge(`POST /api/challenge/open`)를 만들고 봇이 바로 첫 번째 자리에 앉습니다
   (원하는 색 지정 가능). 두 번째로 여는 사람이 들어오면 게임이 시작됩니다.
@@ -158,6 +166,13 @@ rated 링크는 로그인한 사람만 들어올 수 있습니다.
 그 레이팅으로 둡니다. 없는 레벨이거나(범위 밖, 간격에 안 맞음), 이미 첫 수를 뒀거나, 조건이 안 맞으면
 이유를 채팅으로 알려 줍니다. `!diff`만 치면 사용법과 현재 상태를 알려 줍니다.
 
+**익명(로그인 안 한) 상대는 `!diff`를 쓸 수 없습니다.** 리체스는 익명 플레이어의 채팅을 봇에게 전달하지 않기
+때문입니다(서버가 봇의 게임 스트림에 로그인한 사용자의 채팅만 보냄). 익명 상대에게는 대신
+* 링크를 만들 때 레이팅을 정하거나(`link 5+3 1200`, 대시보드 링크 칸의 레벨),
+* 게임 중에 직접 정합니다: 대시보드 게임 화면의 **engine level** 칸(Set / Full strength) 또는 콘솔 `diff <n> 1200`.
+
+익명 상대에게는 쓸 수 없는 `!diff` 안내를 인사말에 붙이지 않습니다.
+
 | 설정 | 기본값 | |
 |---|---|---|
 | `strength.accept` | `true` | 요청을 받을지 (`set strength.accept off`로 끄기) |
@@ -168,6 +183,39 @@ rated 링크는 로그인한 사람만 들어올 수 있습니다.
 
 제한 게임에서는 평가가 일부러 흐트러지므로 기권·무승부 제안·무승부 수락을 하지 않고, `!eval`도 알려 주지
 않으며, 폰더링도 끕니다. 대시보드와 PGN(`[ClaudyRatingLimit "1500"]`)에 제한이 표시됩니다.
+
+## 로컬 대국과 분석 (인터넷 없이도)
+
+리체스 없이 이 기기에서 바로 엔진과 두거나 국면을 분석할 수 있습니다. 봇이 온라인일 때도 같이 쓸 수 있고,
+인터넷이 끊겨 있으면 봇이 오프라인 상태로 켜져서(1분마다 재접속 시도) 이 기능만 씁니다.
+토큰 없이 켜거나 `--offline`을 붙이면 처음부터 리체스에 접속하지 않습니다.
+
+**엔진과 대국** (`play`, 대시보드의 *Play the engine*)
+* 내 색, 시간(1+0 … 30+20 또는 무제한), 엔진 레벨(100~3400 또는 최대)을 고릅니다. 예: `play white 5+3 1200`,
+  `play untimed 5s full`(엔진이 수마다 5초), `play black 10+5 fen <FEN>`(그 국면부터).
+* 수는 브라우저에서 기물을 누르고 도착 칸을 누르거나(승진은 기물 선택 창), 콘솔에 `e4`, `Nf3`, `O-O`처럼 칩니다.
+* 무르기(`takeback`), 무승부 제안·수락, 기권, 게임 중 레벨 변경(engine level 칸 / `diff`)이 됩니다.
+* 게임 중에는 엔진 평가를 가려 둡니다(대시보드의 *Show engine*으로 보기). 끝난 게임은 `games/`의 PGN에 남습니다.
+* 로컬 대국은 사람 상대 슬롯 하나를 차지합니다(엔진이 CPU를 나눠 쓰므로). 온라인 게임을 기다리는 `quit`은
+  로컬 대국을 기다리지 않습니다.
+
+**분석 보드** (`analyze`, F8, 대시보드의 *Analysis*)
+* 엔진이 보이는 국면의 최선 수순을 여러 개(MultiPV, 기본 3줄) 계속 보여 줍니다. 수순을 누르면 그 수를 둡니다.
+* 보드에서 수를 두거나(양쪽 모두) 콘솔에 치면 새 수순을 따라가고, ◀ ▶ / ← → / F3 F4로 앞뒤로 움직입니다.
+* FEN이나 PGN을 붙여 넣어 불러오고(`analyze fen …`, `analyze pgn 파일`), 봇의 게임은 *Analyze* 버튼이나
+  `analyze game <n>`으로 엽니다. 로컬 대국 화면의 국면에서 *Play from here*로 바로 대국을 시작할 수도 있습니다.
+* *Analyze whole game*(`an game 1s`)은 모든 국면을 평가해 그래프를 그리고, 승률을 크게 잃은 수에
+  `?!`(5%p 이상) `?`(10%p) `??`(15%p)를 붙입니다(리체스와 같은 기준).
+* 분석 엔진은 대국 엔진과 별도 프로세스입니다(`analysis.threads`, `analysis.hash`, 0이면 `engine.options`의 값).
+  아무도 분석 화면을 보고 있지 않으면 20초 뒤 멈춥니다.
+
+| 설정 | 기본값 | |
+|---|---|---|
+| `local.name` | You | 로컬 대국에서 내 이름(PGN) |
+| `local.tc` / `local.color` / `local.elo` | 10+5 / random / 1500 | `play`의 기본값 (elo 0 = 최대 실력) |
+| `local.movetime_ms` | 2000 | 무제한 게임에서 엔진의 수당 시간 |
+| `analysis.multipv` | 3 | 분석 줄 수 |
+| `analysis.game_ms` | 1000 | 전체 게임 분석 때 국면당 시간 |
 
 ## 동작 방식
 

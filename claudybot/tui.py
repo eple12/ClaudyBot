@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import time
 import traceback
+from types import SimpleNamespace
 
 import chess
 from rich.console import Group
@@ -79,8 +80,15 @@ class Hooks(UI):
     def watched(self) -> str | None:  # type: ignore[override]
         return self.app.watched if self.app.view == "detail" else None
 
+    @property
+    def view(self) -> str:  # type: ignore[override]
+        return self.app.view
+
     def watch(self, game: GameSession) -> None:
         self.app.watch_game(game.id)
+
+    def analysis(self) -> None:
+        self.app.show_analysis()
 
     def overview(self) -> None:
         self.app.action_overview()
@@ -133,6 +141,16 @@ class ClaudyApp(App):
     #d-chart { width: 1fr; height: 100%; border: round #3a4a5a; padding: 0 1; }
     #d-moves { width: 38; height: 100%; border: round #3a4a5a; padding: 0 1; }
     #d-raw { height: 1fr; border: round #3a4a5a; }
+    #analysis { height: 1fr; }
+    #a-left { width: 38; }
+    #a-boardbox { height: auto; border: round #5a6b7a; padding: 0 1; }
+    #a-board { height: auto; }
+    #a-help { height: 1fr; border: round #3a4a5a; padding: 0 1; }
+    #a-right { width: 1fr; }
+    #a-lines { height: auto; min-height: 5; border: round #5a6b7a; padding: 0 1; }
+    #a-mid { height: 1fr; }
+    #a-chart { width: 1fr; height: 100%; border: round #3a4a5a; padding: 0 1; }
+    #a-moves { width: 38; height: 100%; border: round #3a4a5a; padding: 0 1; }
     #log { height: 8; border-top: solid #3a4a5a; }
     #cmd { height: 3; }
     """
@@ -144,6 +162,7 @@ class ClaudyApp(App):
         Binding("f5", "toggle_pause", "Pause/Resume"),
         Binding("f6", "flip", "Flip board"),
         Binding("f7", "new_link", "Link"),
+        Binding("f8", "analysis", "Analysis"),
         Binding("escape", "overview", "Back", show=False),
         Binding("ctrl+q", "quit_app", "Quit", priority=True),
     ]
@@ -255,6 +274,18 @@ class ClaudyApp(App):
                         yield Static(id="d-chart")
                         yield Static(id="d-moves")
                     yield RichLog(id="d-raw", max_lines=1500, wrap=False)
+            with Horizontal(id="analysis"):
+                with Vertical(id="a-left"):
+                    with Vertical(id="a-boardbox"):
+                        yield Static(id="a-top")
+                        yield Static(id="a-board")
+                        yield Static(id="a-evalbar")
+                    yield Static(id="a-help")
+                with Vertical(id="a-right"):
+                    yield Static(id="a-lines")
+                    with Horizontal(id="a-mid"):
+                        yield Static(id="a-chart")
+                        yield Static(id="a-moves")
         yield RichLog(id="log", max_lines=3000, wrap=True)
         names = self.commands.names + ["pause ignore", "match on", "match off", "match now", "quit now",
                                        "config challenge", "set challenge.", "set engine.options."]
@@ -270,6 +301,10 @@ class ClaudyApp(App):
         self.query_one("#d-raw").border_title = "Engine I/O"
         self.query_one("#d-info").border_title = "Game"
         self.query_one("#side").border_title = "Queue"
+        self.query_one("#a-lines").border_title = "Engine lines"
+        self.query_one("#a-chart").border_title = "Whole game - White win %"
+        self.query_one("#a-moves").border_title = "Moves"
+        self.query_one("#a-help").border_title = "Analysis"
         self.query_one("#cmd").focus()
         self.set_interval(self.cfg.get("ui.refresh_ms") / 1000, self.tick)
         self.run_worker(self._run_manager(), exit_on_error=False)
@@ -293,6 +328,8 @@ class ClaudyApp(App):
             self._log()
             if self.view == "overview":
                 self._overview()
+            elif self.view == "analysis":
+                self._analysis()
             else:
                 self._detail()
         except Exception:
@@ -307,6 +344,8 @@ class ClaudyApp(App):
         t.append("│ ")
         if m.fatal:
             t.append(f"ERROR: {m.fatal} ", style="bold white on red")
+        elif not m.online:
+            t.append("○ OFFLINE " if m.offline_only else "○ OFFLINE (retrying) ", style="bold yellow")
         elif m.quitting:
             t.append("● QUITTING ", style="bold magenta")
         elif m.paused:
@@ -322,7 +361,8 @@ class ClaudyApp(App):
         if m.links:
             t.append(f"links {len(m.links)} │ ")
         t.append(f"MM {'on' if self.cfg.get('matchmaking.enabled') else 'off'} │ ")
-        t.append("stream ok " if m.stream_ok else "stream DOWN ", style="" if m.stream_ok else "bold red")
+        if m.online:
+            t.append("stream ok " if m.stream_ok else "stream DOWN ", style="" if m.stream_ok else "bold red")
         r = m.results
         up = int(time.time() - m.started)
         t.append(f"│ +{r['win']} ={r['draw']} -{r['loss']} │ up {up // 3600}:{up % 3600 // 60:02d}:{up % 60:02d}")
@@ -505,7 +545,8 @@ class ClaudyApp(App):
             return
         style = self.style
         main_h = self.size.height - 1 - 6 - 3 - 1          # topbar, log (6 in this view), input, footer
-        white_bottom = (g.color == chess.WHITE) != self.flip
+        me = g.human_color if g.local else g.color
+        white_bottom = (me == chess.WHITE) != self.flip
         top = chess.BLACK if white_bottom else chess.WHITE
         board_w = self.query_one("#d-board", Static)
         if style == "image":
@@ -548,7 +589,10 @@ class ClaudyApp(App):
         self._titles(box, f"{g.id} · {'rated' if g.rated else 'casual'} {g.speed} {g.tc}")
 
         info = Text()
-        info.append(f"{g.url}\n", style="underline")
+        if g.local:
+            info.append("local game - type your moves (e4, Nf3, O-O); takeback, draw, resign\n", style="bold green")
+        else:
+            info.append(f"{g.url}\n", style="underline")
         info.append(f"move {g.board.fullmove_number}  ply {len(g.moves)}  {g.variant}\n")
         info.append_text(render.search_state(g))
         info.append("\n")
@@ -615,10 +659,138 @@ class ClaudyApp(App):
         self.watch_game(ids[(i + step) % len(ids)])
 
     def action_next_game(self) -> None:
+        if self.view == "analysis":
+            an = self.mgr.get_analysis()
+            self.run_worker(an.goto(an.cursor + 1), exit_on_error=False)
+            return
         self._cycle(1)
 
     def action_prev_game(self) -> None:
+        if self.view == "analysis":
+            an = self.mgr.get_analysis()
+            self.run_worker(an.goto(an.cursor - 1), exit_on_error=False)
+            return
         self._cycle(-1)
+
+    def action_analysis(self) -> None:
+        self.show_analysis()
+
+    def show_analysis(self) -> None:
+        self.view = "analysis"
+        self.query_one("#main", ContentSwitcher).current = "analysis"
+        self._set(self.query_one("#log"), height=6)
+        self.mgr.get_analysis().touch()
+        self.query_one("#cmd").focus()
+        self.tick()
+
+    def _analysis(self) -> None:
+        an = self.mgr.get_analysis()
+        an.touch()
+        style = "sprites" if self.style == "image" else self.style
+        main_h = self.size.height - 1 - 6 - 3 - 1
+        cw, ch = render.square_size(style, self.size.width - 90, main_h - 9)
+        self._set(self.query_one("#a-left"), width=8 * cw + 6)
+        bw = 8 * cw + 2
+        b = an.board
+        self.query_one("#a-board", Static).update(
+            render.board_text(b, white_bottom=not an.flip, cell_w=cw, cell_h=ch, style=style))
+        lines = an.line_list()
+        top_cp = lines[0]["cp"] if lines else (an.evals.get(an.cursor) or {}).get("cp")
+        i = an.cursor - 1
+        shift = 0 if an.start.turn == chess.WHITE else 1
+        where = (f"after {an.start.fullmove_number + (i + shift) // 2}{'...' if (i + shift) % 2 else '.'} "
+                 f"{an.sans[i]}" if an.cursor else "start")
+        head = Text(f"{an.title[:bw]}\n", style="bold")
+        head.append(f"{where}  ply {an.cursor}/{len(an.moves)}  {'white' if b.turn else 'black'} to move", style="dim")
+        self._text(self.query_one("#a-top", Static), head)
+        bar = render.eval_bar(top_cp, max(8, bw - 16))
+        if top_cp is not None:
+            bar.append(f" {fmt_score(top_cp):>6} W{win_percent(max(-2000, min(2000, top_cp))):3.0f}%", style="bold")
+        out = b.outcome(claim_draw=True)
+        if out:
+            bar.append(f"\n{out.result()} {out.termination.name.lower()}", style="bold yellow")
+        self._text(self.query_one("#a-evalbar", Static), bar)
+
+        t = Text()
+        eng = an.engine_name or "engine"
+        live = an.live
+        if an.error:
+            t.append(f"{an.error}\n", style="yellow")
+        if not an.enabled:
+            t.append("engine off - `an on`\n", style="dim")
+        elif an.searching_key is None:
+            t.append("starting...\n", style="dim")
+        else:
+            t.append(f"{eng}  depth {live.get('depth', 0)}  nodes {render.human(live.get('nodes', 0))}  "
+                     f"nps {render.human(live.get('nps', 0))}\n", style="dim")
+        for ln in lines:
+            cp = ln["cp"]
+            st = "bold green" if cp is not None and cp > 30 else "bold red" if cp is not None and cp < -30 else "bold"
+            t.append(f"{ln['score']:>7} ", style=st)
+            t.append(f"d{ln['depth']:<3}", style="dim")
+            n, white = ln["first_move"], ln["white_first"]
+            for k, m in enumerate(ln["san"][:12]):
+                if white:
+                    t.append(f"{n}.", style="dim")
+                elif k == 0:
+                    t.append(f"{n}...", style="dim")
+                t.append(f"{m} ", style="bold" if k == 0 else "")
+                if not white:
+                    n += 1
+                white = not white
+            t.append("\n")
+        lw = self.query_one("#a-lines", Static)
+        self._titles(lw, f"Engine lines · {an.multipv}")
+        self._text(lw, t, layout=True)
+
+        marks = an.marks()
+        evals = an.evals
+        mt = Text()
+        rows = []
+        num = an.start.fullmove_number
+        k = 0
+        if shift and an.sans:
+            rows.append((num, [(None, "..."), (0, an.sans[0])]))
+            k, num = 1, num + 1
+        while k < len(an.sans):
+            rows.append((num, [(k, an.sans[k])] + ([(k + 1, an.sans[k + 1])] if k + 1 < len(an.sans) else [])))
+            k += 2
+            num += 1
+        mh = max(3, self.query_one("#a-moves").size.height - 2)
+        cur_row = next((r for r, (_, cells) in enumerate(rows) if any(c[0] == an.cursor - 1 for c in cells)), 0)
+        first = max(0, min(cur_row - mh // 2, len(rows) - mh))
+        for n, cells in rows[first:first + mh]:
+            mt.append(f"{n:>3}. ", style="dim")
+            for ply, san in cells:
+                label = san + (marks.get(ply, "") if ply is not None else "")
+                e = evals.get(ply + 1) if ply is not None else None
+                style = "reverse bold" if ply is not None and ply == an.cursor - 1 else (
+                    "bold red" if marks.get(ply) == "??" else "bold yellow" if marks.get(ply) in ("?", "?!") else "")
+                mt.append(f"{label:<9}", style=style)
+                mt.append(f"{fmt_score(e['cp']) if e and e['cp'] is not None else '':>6} ", style="cyan")
+            mt.append("\n")
+        if not an.sans:
+            mt.append("no moves - type one (e4, Nf3) or load a game\n", style="dim")
+        self._text(self.query_one("#a-moves", Static), mt)
+
+        shim = SimpleNamespace(evals=[SimpleNamespace(ply=k, white_cp=v["cp"]) for k, v in sorted(evals.items())],
+                               board=b)
+        cw_ = self.query_one("#a-chart")
+        pass_txt = (f" · analysing {an.pass_done}/{an.pass_total}" if an._pass_running()
+                    else f" · {len(evals)} positions" if evals else " · `an game` to analyse all")
+        self._titles(cw_, "Whole game - White win %" + pass_txt)
+        self._text(cw_, render.eval_chart(shim, max(10, cw_.size.width - 4), max(3, cw_.size.height - 3)))
+
+        hlp = Text()
+        hlp.append("type a move (e4, Nf3) to play it\n")
+        hlp.append("F3/F4 back/forward   an first/last\n")
+        hlp.append("an lines 3 · an on/off · an flip\n")
+        hlp.append("an game [1s] whole game\n")
+        hlp.append("analyze fen <FEN> / pgn <file>\n")
+        hlp.append("analyze game <n|id> (bot games)\n")
+        hlp.append("an fen / an pgn: show + copy\n")
+        hlp.append("F2 / Esc: overview\n", style="dim")
+        self._text(self.query_one("#a-help", Static), hlp)
 
     def action_flip(self) -> None:
         self.flip = not self.flip

@@ -1,8 +1,10 @@
 """Console commands (shared by the dashboard and the headless mode)."""
 from __future__ import annotations
 
+import re
 import shlex
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 import chess
@@ -11,6 +13,10 @@ from rich.markup import escape
 from .game import GameSession, fmt_ms, fmt_score
 from .lichess import LichessError
 from .manager import parse_tc
+
+# looks like a chess move (SAN or UCI): typed alone it is played in the local game or on the analysis board
+MOVE_RE = re.compile(r"^(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=?[QRBNqrbn])?|O-O(?:-O)?|0-0(?:-0)?|"
+                     r"[a-h][1-8][a-h][1-8][qrbn]?)[+#!?]*$")
 
 if TYPE_CHECKING:
     from .manager import BotManager
@@ -27,9 +33,18 @@ HELP = [
     ("decline <n|id> [reason]", "decline (reasons: generic later tooFast tooSlow timeControl rated casual variant noBot onlyBot)"),
     ("challenge <user> <min+inc> [rated|casual] [white|black]", "challenge someone, e.g. challenge maia9 3+2 casual"),
     ("cancel <id|all>", "cancel our outgoing challenge(s)"),
-    ("link [min+inc] [rated|casual] [white|black|random] [<hours>h]",
-     "make a 'challenge a friend' link anyone can open to play us, e.g. link 5+3 casual 48h"),
+    ("link [min+inc] [rated|casual] [white|black|random] [<rating>] [<hours>h]",
+     "a 'challenge a friend' link anyone can open to play us, e.g. link 5+3 casual 1500 48h (the rating also "
+     "works for anonymous players, who cannot use !diff)"),
     ("links / link cancel <id|all>", "list / close our open links"),
+    ("play [white|black|random] [10+5|untimed|3s] [<rating>|full] [fen <FEN>]",
+     "play the engine on this device (no Lichess needed); then type your moves: e4, Nf3, O-O, e7e8q"),
+    ("move [n] <move> / takeback [n]", "your move / take back your last move in a local game"),
+    ("analyze [new | fen <FEN> | pgn <file> | game <n|id> | <moves>]",
+     "analysis board (F8): engine lines for any position; type moves to explore"),
+    ("an back|next [k] / first / last / goto <ply>", "step through the analysis line (F3/F4 in the analysis view)"),
+    ("an lines <n> / on / off / game [s] / fen / pgn / flip",
+     "engine lines shown / engine on-off / analyse the whole game (s per position) / show FEN or PGN"),
     ("match on|off|now", "automatic matchmaking against online bots"),
     ("resign|abort|draw [n]", "resign / abort / offer-or-accept a draw in game n (default: watched game)"),
     ("offerdraw [n]", "offer a draw together with the next engine move"),
@@ -52,8 +67,10 @@ HELP = [
 class UI:
     """Hooks the dashboard implements; the headless mode uses this no-op version."""
     watched: str | None = None
+    view: str = "overview"                 # overview | detail | analysis
 
     def watch(self, game: GameSession) -> None: ...
+    def analysis(self) -> None: ...
     def copy(self, text: str) -> None: ...
     def overview(self) -> None: ...
     def clear_log(self) -> None: ...
@@ -75,6 +92,8 @@ class Commands:
             "challenge": self.c_challenge, "ch": self.c_challenge,
             "cancel": self.c_cancel,
             "link": self.c_link, "links": self.c_links,
+            "play": self.c_play, "move": self.c_move, "m": self.c_move, "takeback": self.c_takeback,
+            "undo": self.c_takeback, "analyze": self.c_analyze, "analyse": self.c_analyze, "an": self.c_analyze,
             "match": self.c_match, "mm": self.c_match,
             "resign": self.c_resign, "abort": self.c_abort, "draw": self.c_draw, "offerdraw": self.c_offerdraw,
             "diff": self.c_diff,
@@ -102,6 +121,8 @@ class Commands:
         if cmd.isdigit():
             cmd, rest = "watch", [cmd]
         fn = self.table.get(cmd)
+        if fn is None and len(args) == 1 and MOVE_RE.match(args[0]):
+            fn, rest = self._bare_move, args
         if fn is None:
             return [f"[red]unknown command[/] {escape(cmd)} - type [b]help[/]"]
         try:
@@ -164,7 +185,9 @@ class Commands:
         out = ["[b]running[/]"] if self.mgr.games else ["no running games"]
         for i, g in enumerate(self.mgr.game_list(), 1):
             ev = g.current_eval_white()
-            out.append(f"  [{i}] {g.id} {'W' if g.color == chess.WHITE else 'B'} vs {escape(g.player_label(g.opponent))} "
+            who = (f"you ({'W' if g.human_color == chess.WHITE else 'B'}) vs {escape(g.player_label(g.me))}"
+                   if g.local else f"{'W' if g.color == chess.WHITE else 'B'} vs {escape(g.player_label(g.opponent))}")
+            out.append(f"  [{i}] {g.id} {who} "
                        f"{g.tc} ply {len(g.moves)} eval {fmt_score(ev)} "
                        f"clock {fmt_ms(g.clock(g.color))}/{fmt_ms(g.clock(not g.color))}")
         if self.mgr.finished:
@@ -244,6 +267,159 @@ class Commands:
             await self.mgr.cancel_challenge(cid)
         return [f"canceled {len(ids)} challenge(s)"]
 
+    # ---- local games -----------------------------------------------------------------------------
+    def local_game(self, args: list[str]) -> GameSession:
+        """The local game meant: given by number / id, else the watched one, else the only running one."""
+        if args:
+            g = self.game(args)
+        elif self.ui.watched and (w := self.mgr.games.get(self.ui.watched)) is not None and w.local:
+            g = w
+        else:
+            running = [x for x in self.mgr.game_list() if x.local]
+            if len(running) != 1:
+                raise ValueError("which local game? start one with `play`" if not running else
+                                 "which local game? give its number or id")
+            g = running[0]
+        if g is None or not g.local:
+            raise ValueError("that is not a local game")
+        return g
+
+    async def _bare_move(self, a: list[str]) -> list[str]:
+        if self.ui.view == "analysis":
+            return await self.c_analyze(a)
+        return await self.c_move(a)
+
+    async def c_play(self, a: list[str]) -> list[str]:
+        d = self.mgr.cfg.get("local")
+        color, tc, elo = str(d["color"]), str(d["tc"]), int(d["elo"] or 0)
+        fen = None
+        i = 0
+        while i < len(a):
+            x = a[i].lower()
+            if x in ("white", "black", "random"):
+                color = x
+            elif "+" in x or x in ("untimed", "none", "-"):
+                tc = x
+            elif x.endswith("s") and x[:-1].isdigit():
+                tc = "untimed"
+                self.mgr.cfg.data["local"]["movetime_ms"] = int(x[:-1]) * 1000
+            elif x in ("full", "max", "off"):
+                elo = 0
+            elif x.isdigit():
+                elo = int(x)
+            elif x == "fen":
+                fen = " ".join(a[i + 1:])
+                break
+            else:
+                raise ValueError(f"what is {a[i]}? usage: play [white|black|random] [10+5|untimed|3s] "
+                                 f"[<rating>|full] [fen <FEN>]")
+            i += 1
+        if elo and not 100 <= elo <= 3400:
+            raise ValueError("rating must be 100-3400 (or full)")
+        if fen:
+            b = chess.Board(fen)
+            if not b.is_valid() or b.is_game_over():
+                raise ValueError("that position cannot be played")
+        human = {"white": chess.WHITE, "black": chess.BLACK}.get(color)
+        if human is None:
+            import random
+            human = random.random() < 0.5
+        if tc in ("untimed", "none", "-"):
+            limit_s, inc_s = None, 0
+        else:
+            limit_s, inc_s = parse_tc(tc)
+            if limit_s <= 0 and inc_s <= 0:
+                raise ValueError("that clock has no time")
+        g = self.mgr.start_local(human_color=human, limit_s=limit_s, inc_s=inc_s, elo=elo or None, fen=fen)
+        self.ui.watch(g)
+        side = "white" if human else "black"
+        clock = "untimed" if limit_s is None else tc
+        return [f"[green]local game {g.id}[/]: you play {side}, {clock}, engine "
+                f"{'at ' + str(elo) if elo else 'at full strength'} - type your moves (e4, Nf3, O-O) or click the "
+                f"board in the browser; [b]takeback[/], [b]resign[/], [b]draw[/]"]
+
+    async def c_move(self, a: list[str]) -> list[str]:
+        if not a:
+            return ["usage: move [n] <move>, e.g. move e4 (or just type e4)"]
+        g = self.local_game(a[:-1])
+        err = g.human_move(a[-1])
+        if err:
+            return [f"[red]{escape(err)}[/]"]
+        return []
+
+    async def c_takeback(self, a: list[str]) -> list[str]:
+        g = self.local_game(a)
+        err = g.takeback()
+        return [f"[red]{escape(err)}[/]" if err else "taken back"]
+
+    # ---- analysis ------------------------------------------------------------------------------
+    async def c_analyze(self, a: list[str]) -> list[str]:
+        an = self.mgr.get_analysis()
+        an.touch()
+        self.ui.analysis()
+        if not a:
+            return []
+        sub, rest = a[0].lower(), a[1:]
+        if sub in ("new", "start", "reset"):
+            await an.load()
+            return ["analysis: start position"]
+        if sub == "fen":
+            if not rest:
+                fen = an.board.fen()
+                self.ui.copy(fen)
+                return [escape(fen)]
+            return [f"analysis: {escape(await an.load_text(' '.join(rest)))}"]
+        if sub == "pgn":
+            if not rest:
+                text = an.pgn()
+                self.ui.copy(text)
+                return [escape(line) for line in text.splitlines()]
+            path = Path(" ".join(rest)).expanduser()
+            if not path.is_absolute():
+                path = self.mgr.cfg.resolve(str(path))
+            text = path.read_text(encoding="utf-8-sig", errors="replace")
+            return [f"analysis: {escape(await an.load_text(text))}"]
+        if sub == "game":
+            # `an game` / `an game 2s`: analyse the whole line; `an game <n|id>`: load that bot / local game
+            if rest and not (rest[0].endswith("s") and rest[0][:-1].replace(".", "", 1).isdigit()):
+                g = self.game(rest[:1])
+                assert g is not None
+                return [f"analysis: {escape(await an.load_game(g))}"]
+            ms = int(float(rest[0][:-1]) * 1000) if rest else None
+            return [escape(await an.analyze_game(ms))]
+        if sub in ("back", "prev", "b", "<"):
+            await an.goto(an.cursor - (int(rest[0]) if rest else 1))
+            return []
+        if sub in ("next", "fwd", "n", ">"):
+            await an.goto(an.cursor + (int(rest[0]) if rest else 1))
+            return []
+        if sub in ("first", "home"):
+            await an.goto(0)
+            return []
+        if sub in ("last", "end"):
+            await an.goto(len(an.moves))
+            return []
+        if sub == "goto":
+            await an.goto(int(rest[0]))
+            return []
+        if sub in ("lines", "multipv"):
+            await an.set_multipv(int(rest[0]))
+            return [f"analysis: {an.multipv} line(s)"]
+        if sub in ("on", "off"):
+            await an.set_enabled(sub == "on")
+            return [f"analysis engine {sub}"]
+        if sub == "flip":
+            an.flip = not an.flip
+            return []
+        # otherwise: moves to play on the analysis board
+        played = []
+        for x in a:
+            try:
+                played.append(await an.play(x))
+            except ValueError as e:
+                return ([f"played {' '.join(played)}"] if played else []) + [f"[red]{escape(str(e))}[/]"]
+        return []
+
     async def c_link(self, a: list[str]) -> list[str]:
         if a and a[0] in ("cancel", "close", "del"):
             ids = list(self.mgr.links) if a[1:] and a[1] == "all" else [self._link_id(a[1])]
@@ -255,9 +431,14 @@ class Commands:
             return await self.c_links([])
         d = self.mgr.cfg.get("link")
         tc, rated, color, hours = str(d["tc"]), bool(d["rated"]), str(d["color"]), float(d["hours"])
+        elo = None
         for x in a:
             x = x.lower()
-            if "+" in x:
+            if x.isdigit():
+                elo = int(x)
+            elif x in ("full", "max"):
+                elo = None
+            elif "+" in x:
                 tc = x
             elif x in ("rated", "casual"):
                 rated = x == "rated"
@@ -266,11 +447,13 @@ class Commands:
             elif x.endswith(("h", "d")) and x[:-1].replace(".", "", 1).isdigit():
                 hours = float(x[:-1]) * (24 if x.endswith("d") else 1)
             else:
-                raise ValueError(f"what is {x}? usage: link [min+inc] [rated|casual] [white|black|random] [<hours>h]")
+                raise ValueError(f"what is {x}? usage: link [min+inc] [rated|casual] [white|black|random] "
+                                 f"[<rating>] [<hours>h]")
         limit, inc = parse_tc(tc)
-        ln = await self.mgr.create_link(limit, inc, rated, color, hours)
+        ln = await self.mgr.create_link(limit, inc, rated, color, hours, elo)
         self.ui.copy(ln["url"])
-        return [f"[green]link ready[/] ({escape(ln['tc'])} {'rated' if rated else 'casual'}, we play {color}, "
+        level = f", plays at {elo}" if elo else ""
+        return [f"[green]link ready[/] ({escape(ln['tc'])} {'rated' if rated else 'casual'}, we play {color}{level}, "
                 f"open {hours:g} h): [b]{escape(ln['url'])}[/]"]
 
     def _link_id(self, ref: str) -> str:
@@ -285,8 +468,9 @@ class Commands:
         out = ["[b]open links[/]"]
         for i, ln in enumerate(self.mgr.links.values(), 1):
             left = max(0, ln["expires"] - time.time())
+            level = f" at {ln['elo']}" if ln.get("elo") else ""
             out.append(f"  [{i}] {escape(ln['url'])}  {escape(ln['tc'])} {'rated' if ln['rated'] else 'casual'} "
-                       f"we play {ln['color']}, {left / 3600:.1f} h left")
+                       f"we play {ln['color']}{level}, {left / 3600:.1f} h left")
         return out
 
     async def c_match(self, a: list[str]) -> list[str]:

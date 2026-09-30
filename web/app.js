@@ -157,11 +157,83 @@ class Board {
     this.fen = fen;
     if (still) { void this.root.offsetWidth; this.root.classList.remove("still"); }
   }
+  // ---- moving pieces (local games, analysis): tap a piece, then its target square ----
+  enableInput(onMove) {
+    this.onMove = onMove;
+    this.legal = [];
+    this.legalKey = "";
+    this.sel = null;
+    this.root.addEventListener("click", ev => this.click(ev));
+  }
+  setLegal(list) {
+    list = list || [];
+    const key = list.join(" ");
+    if (key === this.legalKey) return;
+    this.legalKey = key;
+    this.legal = list;
+    if (this.sel && !list.some(m => m.startsWith(this.sel))) this.select(null);
+    setClass(this.root, "input", list.length > 0);
+  }
+  sqAt(ev) {
+    const r = this.root.getBoundingClientRect();
+    const x = Math.floor((ev.clientX - r.left) / r.width * 8), y = Math.floor((ev.clientY - r.top) / r.height * 8);
+    if (x < 0 || x > 7 || y < 0 || y > 7) return null;
+    return this.orient === "white" ? sqName(x, 7 - y) : sqName(7 - x, y);
+  }
+  select(sq) {
+    this.sel = sq;
+    const dests = new Set(sq ? this.legal.filter(m => m.startsWith(sq)).map(m => m.slice(2, 4)) : []);
+    for (const d of this.sqEls) {
+      const s = d.dataset.sq;
+      setClass(d, "sel", s === sq);
+      setClass(d, "dest", dests.has(s));
+      setClass(d, "occ", dests.has(s) && this.pieces.has(s));
+    }
+  }
+  click(ev) {
+    if (!this.onMove || !this.legal.length) return;
+    const sq = this.sqAt(ev);
+    if (!sq) return;
+    if (this.sel && sq !== this.sel) {
+      const from = this.sel;
+      const cands = this.legal.filter(m => m.startsWith(from + sq));
+      if (cands.length) {
+        this.select(null);
+        const send = uci => { this.setLegal([]); this.onMove(uci); };
+        if (cands[0].length === 5) {
+          const p = this.pieces.get(from);
+          pickPromotion(p ? p.code[0] : "w").then(pc => { if (pc) send(from + sq + pc); });
+        } else {
+          send(cands[0]);
+        }
+        return;
+      }
+    }
+    this.select(sq !== this.sel && this.legal.some(m => m.startsWith(sq)) ? sq : null);
+  }
   setBanner(text) {
     if (!text) { if (this.banner) { this.banner.remove(); this.banner = null; } return; }
     if (!this.banner) { this.banner = el("div", "banner"); this.root.appendChild(this.banner); }
     setText(this.banner, text);
   }
+}
+
+function pickPromotion(color) {
+  return new Promise(resolve => {
+    const box = $("#promo");
+    box.textContent = "";
+    const inner = el("div", "box");
+    for (const p of "qrbn") {
+      const b = el("button");
+      b.style.backgroundImage = `url(/pieces/${color}${p.toUpperCase()}.svg)`;
+      b.title = { q: "queen", r: "rook", b: "bishop", n: "knight" }[p];
+      b.onclick = ev => { ev.stopPropagation(); box.hidden = true; resolve(p); };
+      inner.appendChild(b);
+    }
+    box.appendChild(inner);
+    box.onclick = () => { box.hidden = true; resolve(null); };
+    box.hidden = false;
+  });
 }
 
 function setEvalBar(bar, g, orient) {
@@ -185,6 +257,7 @@ function playerHTML(g, color) {
   box.appendChild(document.createTextNode(p.name));
   if (p.rating) box.appendChild(el("span", "rating", `${p.rating}${p.provisional ? "?" : ""}`));
   if (g.color === color) box.appendChild(el("span", "me", "ENGINE"));
+  if (g.local && g.human === color) box.appendChild(el("span", "me you", "YOU"));
   return box;
 }
 
@@ -192,13 +265,14 @@ function stateText(g, since) {
   if (g.over) return [`${g.result} ${g.outcome || ""} (${g.status})`, g.outcome || ""];
   if (g.search === "think") return [`THINKING ${(g.search_s + since).toFixed(1)}s`, "think"];
   if (g.search === "ponder") return [`PONDERING ${g.ponder || ""}`, "ponder"];
+  if (g.status === "started" && g.local) return [g.my_turn ? "engine to move" : "your move", g.my_turn ? "" : "yours"];
   if (g.status === "started") return [g.my_turn ? "to move" : "waiting for opponent", ""];
   return [g.status, ""];
 }
 
 function bannerText(g) {
   if (!g.over) return "";
-  const words = { win: "won", loss: "lost", draw: "draw" };
+  const words = g.local ? { win: "you won", loss: "you lost", draw: "draw" } : { win: "won", loss: "lost", draw: "draw" };
   return `${g.result} · ${words[g.outcome] || g.outcome || ""} · ${g.status}`;
 }
 
@@ -221,7 +295,7 @@ const S = {
 };
 
 function orientOf(g) {
-  const base = g.color;
+  const base = g.local ? g.human : g.color;
   const flip = !!S.flip[g.id];
   return flip ? (base === "white" ? "black" : "white") : base;
 }
@@ -259,10 +333,11 @@ async function runCommand(line, echo = true) {
   }
   const nodes = [logLine("", "cmd", `› ${line.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))}`)];
   try {
-    const r = await api("/api/cmd", { line, watched: S.view === "detail" ? S.watched : null });
+    const r = await api("/api/cmd", { line, watched: S.view === "detail" ? S.watched : null, view: S.view });
     if (r.clear) logEl.textContent = "";
     for (const l of r.lines) nodes.push(logLine("", "", l));
     if (r.go === "") showOverview();
+    else if (r.go === "@analysis") showAnalysis();
     else if (r.go) showDetail(r.go);
     if (r.lines.length && !document.body.classList.contains("log-open")) {
       document.body.classList.add("log-open");
@@ -298,15 +373,22 @@ function confirmRun(question, line) { if (confirm(question)) runCommand(line); }
 
 // ---- header -------------------------------------------------------------------------------------
 $("#home").onclick = () => showOverview();
+$("#btn-an").onclick = () => showAnalysis();
 $("#btn-pause").onclick = () => runCommand(S.state && S.state.paused ? "resume" : "pause");
 $("#btn-mm").onclick = () => runCommand(`match ${S.state && S.state.matchmaking ? "off" : "on"}`);
 
 function renderHeader(st) {
-  setText($("#user"), st.user);
+  setText($("#user"), st.online ? st.user : st.offline_only ? "offline" : "offline · retrying");
   const dot = $("#dot");
   setClass(dot, "ok", st.stream);
   setClass(dot, "bad", !st.stream);
-  dot.title = st.stream ? "event stream connected" : "event stream down";
+  dot.title = !st.online ? "not connected to Lichess: local games and analysis only"
+    : st.stream ? "event stream connected" : "event stream down";
+  $("#btn-pause").hidden = $("#btn-mm").hidden = !!st.offline_only;
+  $("#p-links").hidden = $("#p-queue").hidden = !!st.offline_only;
+  const hint = st.online ? "Challenges are accepted automatically, or type <code>challenge &lt;user&gt; 3+2</code> below."
+    : "Not connected to Lichess: play the engine or open the analysis board below.";
+  if ($("#empty-hint").dataset.h !== hint) { $("#empty-hint").dataset.h = hint; $("#empty-hint").innerHTML = hint; }
   const r = st.results;
   const sl = st.slots || { total: [st.games.length, st.limit] };
   const chips = [
@@ -418,6 +500,7 @@ function renderOverview(st) {
     });
   }
   renderLinks(st);
+  renderPlayForm(st);
   const rc = $("#recent");
   const rk = JSON.stringify(st.recent);
   if (rc.dataset.k !== rk) {
@@ -428,9 +511,9 @@ function renderOverview(st) {
       const li = el("li");
       li.appendChild(el("span", `res ${g.outcome}`, g.outcome));
       li.appendChild(el("span", "num", g.result));
-      li.appendChild(el("span", "grow", `vs ${g.opponent} · ${g.tc} · ${g.status}`));
-      const a = el("a", "", "view ↗"); a.href = g.url; a.target = "_blank"; a.rel = "noopener";
-      li.appendChild(a);
+      li.appendChild(el("span", "grow", `${g.local ? "local · " : ""}vs ${g.opponent} · ${g.tc} · ${g.status}`));
+      if (g.plies) { const b = el("button", "", "Analyze"); b.onclick = () => analyzeGame(g.id); li.appendChild(b); }
+      if (g.url) { const a = el("a", "", "view ↗"); a.href = g.url; a.target = "_blank"; a.rel = "noopener"; li.appendChild(a); }
       rc.appendChild(li);
     }
   }
@@ -478,7 +561,7 @@ function renderLinks(st) {
   if (!links.length) ul.appendChild(el("li", "none", "no open links"));
   for (const l of links) {
     const li = el("li");
-    li.appendChild(el("span", "", `${l.tc} ${l.rated ? "rated" : "casual"} · bot ${l.color}`));
+    li.appendChild(el("span", "", `${l.tc} ${l.rated ? "rated" : "casual"} · bot ${l.color}${l.elo ? ` · plays at ${l.elo}` : ""}`));
     li.appendChild(el("span", "left", linkLeft(l.left)));
     const a = el("a", "url grow", l.url); a.href = l.url; a.target = "_blank"; a.rel = "noopener";
     li.appendChild(a);
@@ -502,16 +585,40 @@ $("#link-form").onsubmit = ev => {
   let tc = $("#lk-tc").value;
   if (tc === "custom") tc = $("#lk-custom").value.trim().replace(/\s+/g, "");
   if (!/^\d+(\.\d+)?\+\d+$/.test(tc)) { alert("Time control like 3+2 (minutes+increment seconds)"); return; }
-  runCommand(`link ${tc} ${$("#lk-mode").value} ${$("#lk-color").value} ${$("#lk-hours").value}h`);
+  const elo = +$("#lk-elo").value;
+  runCommand(`link ${tc} ${$("#lk-mode").value} ${$("#lk-color").value} ${elo ? elo : "full"} ${$("#lk-hours").value}h`);
 };
+
+let playDefaultsSet = false;
+function renderPlayForm(st) {
+  if (playDefaultsSet || !st.local_defaults) return;
+  playDefaultsSet = true;
+  const d = st.local_defaults, keep = store.get("claudy-play", null);
+  $("#pl-color").value = keep ? keep.color : d.color;
+  const tc = keep ? keep.tc : d.tc;
+  if ([...$("#pl-tc").options].some(o => o.value === tc)) $("#pl-tc").value = tc;
+  const elo = String(keep ? keep.elo : d.elo || 0);
+  const sel = $("#pl-elo");
+  if (![...sel.options].some(o => o.value === elo)) { const o = el("option", "", elo); o.value = elo; sel.appendChild(o); }
+  sel.value = elo;
+}
+$("#play-form").onsubmit = ev => {
+  ev.preventDefault();
+  const v = { color: $("#pl-color").value, tc: $("#pl-tc").value, elo: $("#pl-elo").value };
+  store.set("claudy-play", v);
+  runCommand(`play ${v.color} ${v.tc} ${+v.elo ? v.elo : "full"}`);
+};
+$("#pl-an").onclick = () => showAnalysis();
 
 // ---- detail ----------------------------------------------------------------------------------
 const dBoard = new Board($("#d-board"), true);
+dBoard.enableInput(uci => { if (S.watched) sendMove(S.watched, uci); });
 
 function showOverview() {
   S.view = "overview";
   $("#overview").hidden = false;
   $("#detail").hidden = true;
+  $("#analysis").hidden = true;
   if (S.state) renderOverview(S.state);
 }
 function showDetail(id) {
@@ -529,6 +636,7 @@ function showDetail(id) {
   S.view = "detail";
   $("#overview").hidden = true;
   $("#detail").hidden = false;
+  $("#analysis").hidden = true;
   poll(true);
 }
 function cycle(step) {
@@ -546,6 +654,25 @@ $("#d-flip").onclick = () => {
   if (S.detail) renderDetail(S.detail, false);
 };
 $("#d-draw").onclick = () => runCommand(`draw ${S.watched}`);
+$("#d-takeback").onclick = () => runCommand(`takeback ${S.watched}`);
+$("#d-peek").onclick = () => { store.set("claudy-peek", !store.get("claudy-peek", false)); if (S.detail) renderDetail(S.detail, false); };
+$("#d-analyze").onclick = () => analyzeGame(S.watched);
+$("#d-limit").onsubmit = ev => {
+  ev.preventDefault();
+  const v = +$("#d-elo").value;
+  if (v >= 100 && v <= 3400) runCommand(`diff ${S.watched} ${v}`);
+  $("#d-elo").value = "";
+};
+$("#d-elo-full").onclick = () => runCommand(`diff ${S.watched} off`);
+async function sendMove(id, uci) {
+  try {
+    const r = await api("/api/cmd", { line: `move ${id} ${uci}`, watched: id, view: "detail" });
+    if (r.lines.length) logAppend(r.lines.map(l => logLine("", "", l)));
+  } catch (e) {
+    logAppend([logLine("", "error", `move failed: ${e.message}`)]);
+  }
+  poll(true);
+}
 $("#d-abort").onclick = () => confirmRun("Abort this game?", `abort ${S.watched}`);
 $("#d-resign").onclick = () => confirmRun("Resign this game?", `resign ${S.watched}`);
 $("#chat-form").onsubmit = ev => {
@@ -558,15 +685,27 @@ $("#chat-form").onsubmit = ev => {
 function renderDetail(g, animate = true) {
   const orient = orientOf(g);
   const left = $("#d-left");
-  setText($("#d-title"), `${g.idx ? `[${g.idx}] ` : ""}${g.id} · ${g.rated ? "rated" : "casual"} ${g.speed} ${g.tc}` +
+  setText($("#d-title"), `${g.idx ? `[${g.idx}] ` : ""}${g.local ? "local game" : g.id} · ${g.local ? `you play ${g.human}` : g.rated ? "rated" : "casual"} ${g.speed} ${g.tc}` +
     (g.limit ? ` · rating limit ${g.limit}` : "") +
     (g.opp_gone ? " · opponent left" : "") + ((g.color === "white" ? g.bdraw : g.wdraw) ? " · draw offered" : ""));
   renderPlayers(left, g, orient);
   dBoard.update({ fen: g.fen, last: g.last, check: g.check, orient, animate, banner: bannerText(g) });
   setEvalBar($("#d-bar"), g, orient);
   const link = $("#d-link");
-  if (link.href !== g.url) link.href = g.url;
-  for (const id of ["#d-draw", "#d-abort", "#d-resign"]) $(id).disabled = g.over;
+  link.hidden = !g.url;
+  if (g.url && link.href !== g.url) link.href = g.url;
+  for (const id of ["#d-draw", "#d-abort", "#d-resign", "#d-takeback"]) $(id).disabled = g.over;
+  $("#d-takeback").hidden = !g.local;
+  const nopeek = g.local && !g.over && !store.get("claudy-peek", false);
+  setClass($("#detail"), "local", g.local);
+  setClass($("#detail"), "nopeek", nopeek);
+  $("#d-peek").hidden = !g.local || g.over;
+  setText($("#d-peek"), nopeek ? "Show engine" : "Hide engine");
+  $("#d-limit").hidden = g.over;
+  $("#d-elo").placeholder = g.limit ? `now ${g.limit}` : "e.g. 1500";
+  const engineOffer = g.color === "white" ? g.wdraw : g.bdraw;
+  setText($("#d-draw"), g.local && engineOffer ? "Accept draw" : "Offer draw");
+  dBoard.setLegal(g.local && !g.over ? g.legal : []);
 
   // engine summary
   setText($("#d-engname"), g.engine);
@@ -702,6 +841,175 @@ $("#d-chart").addEventListener("pointermove", chartTip);
 $("#d-chart").addEventListener("pointerdown", chartTip);
 $("#d-chart").addEventListener("pointerleave", () => { $("#d-tip").hidden = true; });
 
+// ---- analysis board ---------------------------------------------------------------------------------
+const aBoard = new Board($("#a-board"), true);
+aBoard.enableInput(uci => anOp({ op: "move", move: uci }));
+S.an = null;
+S.anFlip = store.get("claudy-anflip", false);
+
+function showAnalysis() {
+  S.view = "analysis";
+  $("#overview").hidden = true;
+  $("#detail").hidden = true;
+  $("#analysis").hidden = false;
+  poll(true);
+}
+async function analyzeGame(id) {
+  await anOp({ op: "game", id });
+  showAnalysis();
+}
+function esc(t) { return String(t).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+async function anOp(body) {
+  try {
+    const r = await api("/api/analysis", body);
+    if (!r.ok) logAppend([logLine("", "error", esc(r.error))]);
+    else if (r.msg && body.op !== "move") logAppend([logLine("", "", esc(r.msg))]);
+    if (S.view === "analysis") renderAnalysis(r.state);
+    if (!r.ok && !document.body.classList.contains("log-open")) document.body.classList.add("log-open");
+  } catch (e) {
+    logAppend([logLine("", "error", `analysis: ${e.message}`)]);
+  }
+}
+function markClass(m) { return m === "??" ? "mk-blunder" : m === "?" ? "mk-mistake" : "mk-inacc"; }
+function sanLine(l) {
+  let n = l.first_move, white = l.white_first, out = "";
+  l.san.forEach((m, i) => {
+    if (white) out += `${n}. `; else if (i === 0) out += `${n}… `;
+    out += i === 0 ? `<b>${esc(m)}</b> ` : `${esc(m)} `;
+    if (!white) n++;
+    white = !white;
+  });
+  return out;
+}
+function renderAnalysis(a) {
+  S.an = a;
+  const orient = S.anFlip ? "black" : "white";
+  const i = a.cursor - 1, shift = a.start_white ? 0 : 1;
+  const where = a.cursor ? `after ${a.start_move + Math.floor((i + shift) / 2)}${(i + shift) % 2 ? "…" : "."} ${a.sans[i]}` : "start";
+  setText($("#a-title"), `${a.title} · ${where}` + (a.outcome ? ` · ${a.outcome}` : ""));
+  aBoard.update({ fen: a.board_fen, last: a.last, check: a.check, orient, animate: true, banner: "" });
+  aBoard.setLegal(a.legal);
+  setEvalBar($("#a-bar"), { win: a.win, eval: a.eval, eval_text: a.eval_text }, orient);
+  const eb = $("#a-engine");
+  setText(eb, a.enabled ? "Engine on" : "Engine off");
+  setClass(eb, "on", a.enabled);
+  setClass(eb, "off", !a.enabled);
+  if (document.activeElement !== $("#a-mpv")) $("#a-mpv").value = String(Math.min(5, a.multipv));
+  const lv = a.live;
+  setText($("#a-engstat"), a.error ? a.error : a.enabled && a.searching
+    ? `${a.engine} · depth ${lv.depth || 0} · ${human(lv.nodes)} nodes · ${human(lv.nps)} nps`
+    : a.enabled ? a.engine : "off");
+  // engine lines
+  const lb = $("#a-lines");
+  const lk = JSON.stringify(a.lines) + a.enabled;
+  if (lb.dataset.k !== lk) {
+    lb.dataset.k = lk;
+    lb.textContent = "";
+    if (!a.lines.length) lb.appendChild(el("div", "none", a.outcome ? "game over" : a.enabled ? "thinking…" : "engine off"));
+    for (const l of a.lines) {
+      const d = el("div", "line");
+      const sc = el("span", "sc " + (l.cp > 30 ? "green" : l.cp < -30 ? "red" : ""), l.score);
+      const pv = el("span", "pv");
+      pv.innerHTML = sanLine(l);
+      d.append(sc, el("span", "d", `d${l.depth}`), pv);
+      d.onclick = () => anOp({ op: "move", move: l.move });
+      lb.appendChild(d);
+    }
+  }
+  // moves
+  const mb = $("#a-moves");
+  const mk = `${a.version}|${a.cursor}|${a.sans.length}|${a.evals.length}`;
+  if (mb.dataset.k !== mk) {
+    mb.dataset.k = mk;
+    mb.textContent = "";
+    const evalAt = new Map(a.evals.map(e => [e.ply, e]));
+    let moveNo = a.start_move;
+    if (!a.start_white) mb.append(el("div", "n", `${moveNo}.`), el("div", "m", "…"));
+    a.sans.forEach((san, i) => {
+      const white = (i % 2 === 0) === a.start_white;
+      if (white) mb.appendChild(el("div", "n", `${moveNo}.`));
+      const m = el("div", "m", san);
+      const mark = a.marks[String(i)];
+      if (mark) m.appendChild(el("span", `mk ${markClass(mark)}`, mark));
+      const e = evalAt.get(i + 1);
+      if (e) m.appendChild(el("span", "e", e.text));
+      if (i === a.cursor - 1) m.classList.add("cur");
+      m.onclick = () => anOp({ op: "goto", ply: i + 1 });
+      mb.appendChild(m);
+      if (!white) moveNo++;
+    });
+    const cur = $(".m.cur", mb);
+    if (cur) cur.scrollIntoView({ block: "nearest" });
+  }
+  // whole-game chart
+  const p = a.pass;
+  setText($("#a-passinfo"), p.running ? `analysing ${p.done}/${p.total}` : a.evals.length ? `${a.evals.length} positions analysed` : "");
+  setText($("#a-pass"), p.running ? "Analysing…" : "Analyze whole game");
+  $("#a-pass").disabled = p.running || !a.total;
+  const svg = $("#a-chart");
+  const pts = a.evals.filter(e => e.cp !== null);
+  const ck = pts.map(e => `${e.ply}:${e.cp}`).join(",") + `|${a.cursor}|${a.total}`;
+  if (svg.dataset.k !== ck) {
+    svg.dataset.k = ck;
+    const maxPly = Math.max(a.total, 20);
+    svg.maxPly = maxPly;
+    const X = ply => (ply / maxPly) * 1000, Y = cp => 200 - winPct(cp) * 2;
+    let html = "";
+    if (pts.length) {
+      let line = "";
+      pts.forEach((e, i) => { line += `${i ? "L" : "M"}${X(e.ply).toFixed(1)},${Y(e.cp).toFixed(1)}`; });
+      const area = `M${X(pts[0].ply).toFixed(1)},200 ` + line.replace(/^M/, "L") + ` L${X(pts[pts.length - 1].ply).toFixed(1)},200 Z`;
+      html += `<path d="${area}" fill="#e8e6e3" fill-opacity=".85"/><path d="${line}" fill="none" stroke="#3692e7" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+      for (const e of a.evals) if (e.mark === "??" || e.mark === "?") {
+        html += `<circle cx="${X(e.ply).toFixed(1)}" cy="${Y(e.cp ?? 0).toFixed(1)}" r="5" fill="${e.mark === "??" ? "#ff6b6b" : "#ff9f43"}"/>`;
+      }
+    } else {
+      html += `<text x="500" y="105" text-anchor="middle" fill="#8a8784" font-size="22">${a.total ? "Analyze whole game for a graph" : "no moves"}</text>`;
+    }
+    html += `<line x1="0" y1="100" x2="1000" y2="100" stroke="#d85000" stroke-opacity=".6" stroke-dasharray="6 6" vector-effect="non-scaling-stroke"/>`;
+    html += `<line x1="${X(a.cursor).toFixed(1)}" y1="0" x2="${X(a.cursor).toFixed(1)}" y2="200" stroke="#3692e7" stroke-opacity=".8" vector-effect="non-scaling-stroke"/>`;
+    svg.innerHTML = html;
+  }
+}
+$("#a-chart").addEventListener("click", ev => {
+  const a = S.an, svg = $("#a-chart");
+  if (!a || !a.total) return;
+  const r = svg.getBoundingClientRect();
+  anOp({ op: "goto", ply: Math.max(0, Math.min(a.total, Math.round((ev.clientX - r.left) / r.width * svg.maxPly))) });
+});
+function anGo(delta, abs) {
+  const a = S.an;
+  if (!a) return;
+  const ply = abs !== undefined ? abs : a.cursor + delta;
+  if (ply >= 0 && ply <= a.total && ply !== a.cursor) anOp({ op: "goto", ply });
+}
+$("#a-first").onclick = () => anGo(0, 0);
+$("#a-prev").onclick = () => anGo(-1);
+$("#a-next").onclick = () => anGo(1);
+$("#a-last").onclick = () => S.an && anGo(0, S.an.total);
+$("#a-back").onclick = () => showOverview();
+$("#a-flip").onclick = () => { S.anFlip = !S.anFlip; store.set("claudy-anflip", S.anFlip); if (S.an) renderAnalysis(S.an); };
+$("#a-engine").onclick = () => S.an && anOp({ op: "engine", on: !S.an.enabled });
+$("#a-mpv").onchange = () => anOp({ op: "lines", n: +$("#a-mpv").value });
+$("#a-pass").onclick = () => anOp({ op: "pass", ms: +$("#a-passms").value });
+$("#a-load").onsubmit = ev => { ev.preventDefault(); anOp({ op: "load", text: $("#a-text").value }); };
+$("#a-copyfen").onclick = async () => { if (S.an) setText($("#a-copyfen"), await copyText(S.an.fen) ? "Copied" : "Copy failed"); setTimeout(() => setText($("#a-copyfen"), "Copy FEN"), 1500); };
+$("#a-copypgn").onclick = async () => { if (S.an) setText($("#a-copypgn"), await copyText(S.an.pgn) ? "Copied" : "Copy failed"); setTimeout(() => setText($("#a-copypgn"), "Copy PGN"), 1500); };
+$("#a-play").onclick = () => {
+  if (!S.an || S.an.outcome) return;
+  const elo = +$("#pl-elo").value;
+  const tc = $("#pl-tc").value;
+  runCommand(`play ${S.an.turn} ${tc} ${elo ? elo : "full"} fen ${S.an.fen}`);
+};
+document.addEventListener("keydown", ev => {
+  if (S.view !== "analysis" || ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
+  if (ev.key === "ArrowLeft") { anGo(-1); ev.preventDefault(); }
+  else if (ev.key === "ArrowRight") { anGo(1); ev.preventDefault(); }
+  else if (ev.key === "Home") { anGo(0, 0); ev.preventDefault(); }
+  else if (ev.key === "End" && S.an) { anGo(0, S.an.total); ev.preventDefault(); }
+  else if (ev.key === "Escape") showOverview();
+});
+
 // ---- polling -------------------------------------------------------------------------------
 let timer = null;
 let busy = false;
@@ -717,6 +1025,10 @@ async function poll(now = false) {
     S.logNext = st.log_next;
     renderHeader(st);
     if (S.view === "overview") renderOverview(st);
+    if (S.view === "analysis") {
+      const a = await api("/api/analysis");
+      renderAnalysis(a);
+    }
     if (S.view === "detail" && S.watched) {
       const first = !S.detail || S.detail.id !== S.watched;
       try {

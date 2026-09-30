@@ -115,6 +115,8 @@ class EvalPoint:
 
 
 class GameSession:
+    local = False                                   # LocalGame (local.py): played on this device, not on Lichess
+
     def __init__(self, mgr: "BotManager", game_id: str, start_event: dict | None = None):
         self.mgr = mgr
         self.li = mgr.li
@@ -180,6 +182,8 @@ class GameSession:
         self.limit_elo: int | None = None          # rating limit for this game (None = full strength)
         self._limit_pending: int | None = None     # requested limit, applied by the engine driver (0 = off)
         self.overhead_now: int | None = None
+        self.ponder_ok = True                      # False: never ponder (e.g. untimed local games)
+        self.preset_limit = False                  # limit_elo came with the challenge link
         self._last_len = -1
         if start_event:
             opp = start_event.get("opponent") or {}
@@ -204,7 +208,7 @@ class GameSession:
             return f"Stockfish level {p['aiLevel']}"
         title = f"{p['title']} " if p.get("title") else ""
         rating = f" ({p['rating']}{'?' if p.get('provisional') else ''})" if p.get("rating") else ""
-        return f"{title}{p.get('name') or '?'}{rating}"
+        return f"{title}{p.get('name') or ('?' if p.get('id') else 'Anonymous')}{rating}"
 
     @property
     def my_turn(self) -> bool:
@@ -664,7 +668,7 @@ class GameSession:
             raise
         if offer:
             self.log("info", "offered a draw with the move")
-        if self.cfg.get("engine.ponder") and ponder and not self.limit_elo:
+        if self.cfg.get("engine.ponder") and ponder and not self.limit_elo and self.ponder_ok:
             self.pending_ponder = (self.moves + [best], ponder)
         self.changed.set()
 
@@ -747,7 +751,7 @@ class GameSession:
 
     # ---- chat --------------------------------------------------------------
     def _fmt(self, text: str) -> str:
-        return text.format(me=self.mgr.username, opponent=self.opponent.get("name") or "opponent",
+        return text.format(me=self.mgr.username, opponent=self.opponent.get("name") or "there",
                            engine=self.engine.name if self.engine else "my engine")
 
     async def _say_hello(self) -> None:
@@ -756,7 +760,11 @@ class GameSession:
             await self._safe(self.li.chat(self.id, "player", self._fmt(g["greeting"])), "chat")
         if g["greeting_spectators"]:
             await self._safe(self.li.chat(self.id, "spectator", self._fmt(g["greeting_spectators"])), "chat")
-        if self.cfg.get("strength.announce") and self.limit_eligible() is None and not self._opponent_has_moved():
+        if self.preset_limit and self.limit_elo:
+            await self._safe(self.li.chat(self.id, "player", f"This game I play at about {self.limit_elo} rating "
+                                                             f"(set by the challenge link). Have fun!"), "chat")
+        elif (self.cfg.get("strength.announce") and self.limit_eligible() is None and not self._opponent_has_moved()
+              and self.opponent.get("id")):          # anonymous players' chat never reaches a bot
             lo, hi, step = self.limit_levels()
             await self._safe(self.li.chat(self.id, "player",
                                           f"Want an easier game? Type !diff <rating> ({lo}-{hi}) before your first "

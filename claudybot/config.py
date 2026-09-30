@@ -85,6 +85,19 @@ DEFAULTS: dict[str, Any] = {
         "color": "random",            # our color: random | white | black
         "hours": 24,                  # the link stays open this long (Lichess allows up to 2 weeks = 336 h)
     },
+    "local": {                        # games against the engine on this device (command `play`, dashboard)
+        "name": "You",                # your name in the game and its PGN
+        "tc": "10+5",                 # default clock (minutes+increment) or "untimed"
+        "color": "random",            # your color: random | white | black
+        "elo": 1500,                  # the engine's default rating (0 = full strength)
+        "movetime_ms": 2000,          # engine time per move in untimed games
+    },
+    "analysis": {                     # analysis board (command `analyze`, dashboard)
+        "multipv": 3,                 # engine lines shown
+        "threads": 0,                 # engine threads (0 = engine.options.Threads)
+        "hash": 0,                    # MB (0 = engine.options.Hash)
+        "game_ms": 1000,              # time per position when a whole game is analysed
+    },
     "strength": {                     # rating-limited games: the opponent types "!diff <rating>" in the chat
         "accept": True,               # accept such requests at all
         "modes": "casual",            # casual | rated | both
@@ -125,6 +138,7 @@ CHOICES = {
     "challenge.sort": ["first", "best"],
     "ui.pieces": ["image", "sprites", "letters", "unicode"],
     "link.color": ["random", "white", "black"],
+    "local.color": ["random", "white", "black"],
     "strength.modes": ["casual", "rated", "both"],
     "strength.opponents": ["human", "bot", "both"],
     "log.level": ["debug", "info", "warning"],

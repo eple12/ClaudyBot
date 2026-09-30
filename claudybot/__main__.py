@@ -109,6 +109,8 @@ def main() -> int:
     ap.add_argument("--web", nargs="?", type=int, const=0, default=None, metavar="PORT",
                     help="also serve the browser dashboard (default port: web.port, 8080)")
     ap.add_argument("--web-host", default=None, help="web dashboard address (default 127.0.0.1)")
+    ap.add_argument("--offline", action="store_true",
+                    help="do not connect to Lichess: play the engine and analyse on this device only")
     ap.add_argument("--check", action="store_true", help="verify the token and show the account, then exit")
     ap.add_argument("--upgrade", action="store_true", help="upgrade the account to a BOT account (irreversible)")
     a = ap.parse_args()
@@ -116,13 +118,18 @@ def main() -> int:
     cfg = Config(a.config)
     url = a.url or cfg.get("url")
     local = url.startswith("http://127.0.0.1") or url.startswith("http://localhost")
+    offline = a.offline
     if not cfg.token():
         if local:
             cfg.data["token"] = "mock-token"
-        else:
+        elif a.check or a.upgrade:
             print("No Lichess token: set LICHESS_BOT_TOKEN, or `token:` / `token_file:` in bot/config.yml",
                   file=sys.stderr)
             return 2
+        else:
+            print("No Lichess token (LICHESS_BOT_TOKEN, or token: / token_file: in bot/config.yml): starting "
+                  "offline - local games and analysis only", file=sys.stderr)
+            offline = True
 
     if a.check or a.upgrade:
         try:
@@ -146,7 +153,7 @@ def main() -> int:
             sys.stdout.reconfigure(errors="replace")
         except AttributeError:
             pass
-        mgr = BotManager(cfg, url, echo=print)
+        mgr = BotManager(cfg, url, echo=print, offline=offline)
         attach_web(mgr)
         try:
             asyncio.run(run_headless(mgr))
@@ -161,7 +168,7 @@ def main() -> int:
 
     from .tui import ClaudyApp
     graphics = detect_graphics()           # must run before Textual takes over the terminal
-    mgr = BotManager(cfg, url)
+    mgr = BotManager(cfg, url, offline=offline)
     attach_web(mgr)
     mgr.log("info", "board pictures: " + ("terminal graphics (Sixel/Kitty)" if graphics else
                                           "not supported by this terminal - using block sprites"))

@@ -271,6 +271,7 @@ class MockLichess:
         self.games: dict[str, MockGame] = {}
         self.link_join = 8.0            # --link-join: a visitor takes an open link after this many seconds (0 = never)
         self.open_scope = True          # --no-open-scope: the token may not create open challenges (HTTP 403)
+        self.anon_visitor = False       # --anon-visitor: links are taken by an anonymous player
 
     async def net_delay(self) -> None:
         """One network trip: half the round trip, with jitter and an occasional spike."""
@@ -579,6 +580,9 @@ class MockLichess:
             return
         name, rating, _ = random.choice([x for x in FAKE_PLAYERS if not x[2]])
         ch["destUser"] = {"id": name.lower(), "name": name, "title": None, "rating": rating}
+        if self.anon_visitor:
+            ch["destUser"] = {"id": None, "name": None, "title": None, "rating": None}
+            name = "an anonymous player"
         self.challenges.pop(ch["id"])
         seat = ch.get("seat")
         self.log(f"{name} opened link {ch['id']}")
@@ -611,6 +615,7 @@ async def amain(a) -> None:
     srv.lag_ms = a.lag
     srv.link_join = a.link_join
     srv.open_scope = not a.no_open_scope
+    srv.anon_visitor = a.anon_visitor
     srv.rated_prob = a.rated
     if a.tc:
         base, _, inc = a.tc.partition("+")
@@ -640,6 +645,7 @@ def main() -> None:
     ap.add_argument("--rated", type=float, default=0.6, help="share of rated incoming challenges")
     ap.add_argument("--tc", default=None, help="force the clock of incoming challenges, seconds: e.g. 30+1")
     ap.add_argument("--link-join", type=float, default=8, help="seconds until a visitor takes an open link (0 = never)")
+    ap.add_argument("--anon-visitor", action="store_true", help="links are taken by anonymous players")
     ap.add_argument("--no-open-scope", action="store_true",
                     help="refuse open challenges made with the token (the bot must fall back to anonymous)")
     a = ap.parse_args()

@@ -9,7 +9,9 @@ catches up when it wakes.
     GET  /pieces/<code>.svg   piece images of ui.piece_set (wK.svg, bP.svg, ...)
     GET  /api/state?log=N     bot status, games, queue, log lines after N
     GET  /api/game/<id>?raw=N one game in detail (search table, evals, moves, raw engine I/O after N)
-    POST /api/cmd             {"line": "...", "watched": "<game id>"} -> command output
+    POST /api/cmd             {"line": "...", "watched": "<game id>", "view": "..."} -> command output
+    GET  /api/analysis        the analysis board (engine lines, moves, whole-game evaluations)
+    POST /api/analysis        {"op": "load" | "move" | "goto" | "lines" | "engine" | "game" | "flip", ...}
 
 By default it listens on 127.0.0.1 only. When it listens on the network (web.host 0.0.0.0) every
 API call needs the access key (web.key, generated when empty), given once as ?key=... in the URL.
@@ -118,6 +120,8 @@ def game_summary(g: GameSession, idx: int) -> dict:
         "depth": live.get("depth", g.evals[-1].depth if g.evals else 0),
         "nps": live.get("nps") or (g.evals[-1].nps if g.evals else 0),
         "wdraw": g.wdraw, "bdraw": g.bdraw, "opp_gone": g.opp_gone, "limit": g.limit_elo,
+        "local": g.local, "human": ("white" if g.human_color == chess.WHITE else "black") if g.local else None,
+        "legal": g.legal_moves() if g.local else [],
     }
 
 
@@ -150,7 +154,7 @@ def game_detail(g: GameSession, idx: int, raw_from: int) -> dict:
         "raw": raw, "raw_next": g.raw_total,
         "chat": [list(c) for c in g.chat][-60:],
         "pgn": g.pgn_path or "",
-        "lag": g.mgr.lag.text(), "overhead": g.overhead_now,
+        "lag": "" if g.local else g.mgr.lag.text(), "overhead": g.overhead_now,
     })
     return d
 
@@ -158,13 +162,17 @@ def game_detail(g: GameSession, idx: int, raw_from: int) -> dict:
 class _RequestUI(UI):
     """Collects what a command asks the view to do (watch a game, go back, clear the log)."""
 
-    def __init__(self, watched: str | None):
+    def __init__(self, watched: str | None, view: str | None = None):
         self.watched = watched or None
+        self.view = view or ("detail" if watched else "overview")
         self.go: str | None = None
         self.clear = False
 
     def watch(self, game: GameSession) -> None:
         self.go = game.id
+
+    def analysis(self) -> None:
+        self.go = "@analysis"
 
     def overview(self) -> None:
         self.go = ""
@@ -229,7 +237,7 @@ class WebServer:
                     k, _, v = h.decode("latin-1").partition(":")
                     headers[k.strip().lower()] = v.strip()
                 n = int(headers.get("content-length") or 0)
-                if n > 1 << 16:
+                if n > 1 << 19:
                     await self._send(writer, 413, "text/plain", b"too large")
                     break
                 body = await reader.readexactly(n) if n else b""
@@ -333,8 +341,51 @@ class WebServer:
                 req = json.loads(body or b"{}")
             except ValueError:
                 return 400, "text/plain", b"bad json", False
-            return self._json(await self.command(str(req.get("line", ""))[:500], req.get("watched")))
+            return self._json(await self.command(str(req.get("line", ""))[:2000], req.get("watched"),
+                                                 req.get("view")))
+        if path == "/api/analysis":
+            an = self.mgr.get_analysis()
+            if method == "GET":
+                an.touch()
+                return self._json(an.state())
+            if "application/json" not in headers.get("content-type", ""):
+                return 400, "text/plain", b"json body expected", False
+            try:
+                req = json.loads(body or b"{}")
+            except ValueError:
+                return 400, "text/plain", b"bad json", False
+            return self._json(await self.analysis_op(an, req))
         return 404, "text/plain", b"not found", False
+
+    async def analysis_op(self, an, req: dict) -> dict:
+        op = str(req.get("op", ""))
+        an.touch()
+        msg = ""
+        try:
+            if op == "load":
+                msg = await an.load_text(str(req.get("text", "")))
+            elif op == "game":
+                g, _ = self._find(str(req.get("id", "")))
+                if g is None:
+                    raise ValueError("no such game")
+                msg = await an.load_game(g)
+            elif op == "move":
+                msg = await an.play(str(req.get("move", "")))
+            elif op == "goto":
+                await an.goto(int(req.get("ply", 0)))
+            elif op == "lines":
+                await an.set_multipv(int(req.get("n", 1)))
+            elif op == "engine":
+                await an.set_enabled(bool(req.get("on")))
+            elif op == "pass":
+                msg = await an.analyze_game(int(req["ms"]) if req.get("ms") else None)
+            elif op == "flip":
+                an.flip = not an.flip
+            else:
+                raise ValueError(f"unknown op {op}")
+        except (ValueError, KeyError, OSError) as e:
+            return {"ok": False, "error": str(e) or type(e).__name__, "state": an.state()}
+        return {"ok": True, "msg": msg, "state": an.state()}
 
     # ---- public read-only telemetry (web.public) --------------------------------------------------
     def _public(self, method: str, target: str, force: bool = False):
@@ -347,7 +398,7 @@ class WebServer:
             return 404, "text/plain", b"not found", False
         m = self.mgr
         games = []
-        for i, g in enumerate(m.game_list(), 1):
+        for i, g in enumerate([x for x in m.game_list() if not x.local], 1):
             d = game_detail(g, i, g.raw_total)          # starting at the end: no raw lines
             for k in ("raw", "raw_next", "chat", "pgn"):
                 d.pop(k, None)
@@ -378,10 +429,12 @@ class WebServer:
         return {
             "user": m.username, "server": m.base_url, "up": int(time.time() - m.started),
             "stream": m.stream_ok, "paused": m.paused, "quitting": m.quitting or "",
+            "online": m.online, "offline_only": m.offline_only, "local_defaults": m.cfg.get("local"),
             "limit": c["concurrency"], "matchmaking": bool(m.cfg.get("matchmaking.enabled")),
             "results": {"win": m.results["win"], "draw": m.results["draw"], "loss": m.results["loss"]},
             "games": [game_summary(g, i) for i, g in enumerate(m.game_list(), 1)],
             "recent": [{"id": g.id, "url": g.url, "outcome": g.outcome_for_me(), "result": g.result(), "status": g.status,
+                        "local": g.local, "plies": len(g.moves),
                         "opponent": g.player_label(g.opponent), "tc": g.tc,
                         "color": "white" if g.color == chess.WHITE else "black"}
                        for g in list(m.finished)[:12]],
@@ -405,8 +458,8 @@ class WebServer:
             out[k] = [use[k], m.slot_cap(k)]
         return out
 
-    async def command(self, line: str, watched: str | None) -> dict:
-        ui = _RequestUI(watched)
+    async def command(self, line: str, watched: str | None, view: str | None = None) -> dict:
+        ui = _RequestUI(watched, view)
         out = await Commands(self.mgr, ui).execute(line)
         if line.strip():
             self.mgr.log("debug", f"web command: {line.strip()}")

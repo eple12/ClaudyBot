@@ -15,6 +15,7 @@
   <div id="who"><span id="dot" class="dot"></span><span id="user">connecting…</span></div>
   <div id="chips"></div>
   <div class="spacer"></div>
+  <button id="btn-an" class="pill" title="Analysis board">Analysis</button>
   <button id="btn-pause" class="pill"></button>
   <button id="btn-mm" class="pill"></button>
 </header>
@@ -25,14 +26,30 @@
     <div id="empty" class="empty" hidden>
       <img src="/pieces/wN.svg" alt="">
       <p>No games running.</p>
-      <p class="dim">Challenges are accepted automatically, or type <code>challenge &lt;user&gt; 3+2</code> below.</p>
+      <p class="dim" id="empty-hint">Challenges are accepted automatically, or type <code>challenge &lt;user&gt; 3+2</code> below.</p>
     </div>
     <div id="lists">
-      <div class="panel"><h3>Challenge queue</h3><ul id="queue" class="rows"></ul></div>
+      <div class="panel" id="p-queue"><h3>Challenge queue</h3><ul id="queue" class="rows"></ul></div>
       <div class="panel"><h3>Recent games</h3><ul id="recent" class="rows"></ul></div>
+      <div class="panel" id="p-play">
+        <h3>Play the engine <span class="dim">on this device, no internet needed</span></h3>
+        <form id="play-form" class="formrow">
+          <select id="pl-color" title="Your color">
+            <option value="random">you: random</option><option value="white">you: white</option><option value="black">you: black</option>
+          </select>
+          <select id="pl-tc" title="Clock (minutes + increment)">
+            <option>1+0</option><option>3+0</option><option>3+2</option><option>5+0</option><option>5+3</option>
+            <option>10+0</option><option>10+5</option><option>15+10</option><option>30+0</option><option>30+20</option>
+            <option value="untimed">untimed</option>
+          </select>
+          <select id="pl-elo" title="Engine strength"><option value="0">full strength</option><option value="400">400</option><option value="600">600</option><option value="800">800</option><option value="1000">1000</option><option value="1200">1200</option><option value="1400">1400</option><option value="1500">1500</option><option value="1600">1600</option><option value="1800">1800</option><option value="2000">2000</option><option value="2200">2200</option><option value="2400">2400</option><option value="2600">2600</option><option value="2800">2800</option><option value="3000">3000</option></select>
+          <button class="primary">Play</button>
+          <button type="button" id="pl-an">Analysis board</button>
+        </form>
+      </div>
       <div class="panel" id="p-links">
         <h3>Challenge links <span class="dim">whoever opens the link plays the bot</span></h3>
-        <form id="link-form">
+        <form id="link-form" class="formrow">
           <select id="lk-tc" title="Time control (minutes + increment)">
             <option>1+0</option><option>1+1</option><option>2+1</option><option>3+0</option><option>3+2</option>
             <option>5+0</option><option>5+3</option><option>10+0</option><option>10+5</option><option>15+10</option>
@@ -43,6 +60,7 @@
           <select id="lk-color" title="The bot's color">
             <option value="random">bot: random</option><option value="white">bot: white</option><option value="black">bot: black</option>
           </select>
+          <select id="lk-elo" title="The bot's strength in that game (works for anonymous players too)"><option value="0">full strength</option><option value="400">400</option><option value="600">600</option><option value="800">800</option><option value="1000">1000</option><option value="1200">1200</option><option value="1400">1400</option><option value="1500">1500</option><option value="1600">1600</option><option value="1800">1800</option><option value="2000">2000</option><option value="2200">2200</option><option value="2400">2400</option><option value="2600">2600</option><option value="2800">2800</option><option value="3000">3000</option></select>
           <select id="lk-hours" title="How long the link stays open">
             <option value="1">1 h</option><option value="6">6 h</option><option value="24">24 h</option>
             <option value="72">3 days</option><option value="168">7 days</option><option value="336">14 days</option>
@@ -69,11 +87,20 @@
       <div class="player bottom" id="d-pbot"><div class="name"></div><div class="clock"></div></div>
       <div class="controls">
         <button id="d-flip">Flip</button>
+        <button id="d-takeback" hidden>Takeback</button>
         <button id="d-draw">Offer draw</button>
         <button id="d-abort" class="warn">Abort</button>
         <button id="d-resign" class="danger">Resign</button>
+        <button id="d-analyze">Analyze</button>
+        <button id="d-peek" hidden title="Show the engine's evaluation during your game">Show engine</button>
         <a id="d-link" target="_blank" rel="noopener">Lichess ↗</a>
       </div>
+      <form class="controls" id="d-limit" title="Rating limit for the engine in this game">
+        <span class="dim">engine level</span>
+        <input id="d-elo" type="number" min="100" max="3400" step="1" placeholder="e.g. 1500" inputmode="numeric">
+        <button>Set</button>
+        <button type="button" id="d-elo-full">Full strength</button>
+      </form>
     </div>
     <div id="d-right">
       <div class="panel" id="p-engine">
@@ -101,7 +128,59 @@
       <div class="panel" id="p-raw"><h3>Engine I/O</h3><pre id="d-raw"></pre></div>
     </div>
   </section>
+  <section id="analysis" hidden>
+    <div id="a-left">
+      <div class="gamebar">
+        <button id="a-back" class="icon" title="Back to the overview">&#10005;</button>
+        <div id="a-title"></div>
+      </div>
+      <div class="board-row">
+        <div class="evalbar" id="a-bar"><div class="fill"></div><span class="txt"></span></div>
+        <div class="board big" id="a-board"></div>
+      </div>
+      <div class="controls nav">
+        <button id="a-first" title="Start (Home)">&#9198;</button>
+        <button id="a-prev" title="Back (←)">&#9664;</button>
+        <button id="a-next" title="Forward (→)">&#9654;</button>
+        <button id="a-last" title="End (End)">&#9197;</button>
+        <button id="a-flip">Flip</button>
+        <button id="a-engine" class="pill"></button>
+        <select id="a-mpv" title="Engine lines">
+          <option value="1">1 line</option><option value="2">2 lines</option><option value="3">3 lines</option>
+          <option value="4">4 lines</option><option value="5">5 lines</option>
+        </select>
+      </div>
+      <form id="a-load">
+        <textarea id="a-text" rows="3" placeholder="Paste a FEN or a PGN, then Load (empty = start position)" spellcheck="false"></textarea>
+        <div class="controls">
+          <button class="primary">Load</button>
+          <button type="button" id="a-copyfen">Copy FEN</button>
+          <button type="button" id="a-copypgn">Copy PGN</button>
+          <button type="button" id="a-play" title="Play the engine from this position">Play from here</button>
+        </div>
+      </form>
+    </div>
+    <div id="a-right">
+      <div class="panel" id="a-engpanel">
+        <h3>Engine <span id="a-engstat" class="dim"></span></h3>
+        <div id="a-lines"></div>
+      </div>
+      <div class="panel">
+        <h3>Game <span id="a-passinfo" class="dim"></span></h3>
+        <div class="controls">
+          <button type="button" id="a-pass">Analyze whole game</button>
+          <select id="a-passms" title="Engine time per position">
+            <option value="300">0.3 s / move</option><option value="1000" selected>1 s / move</option>
+            <option value="3000">3 s / move</option>
+          </select>
+        </div>
+        <div class="chartwrap"><svg id="a-chart" viewBox="0 0 1000 200" preserveAspectRatio="none"></svg></div>
+      </div>
+      <div class="panel"><h3>Moves</h3><div id="a-moves"></div></div>
+    </div>
+  </section>
 </main>
+<div id="promo" hidden></div>
 
 <footer id="bottom">
   <div id="log"></div>

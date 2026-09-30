@@ -47,8 +47,11 @@ KINDS = ("bot", "human")
 
 
 class BotManager:
-    def __init__(self, cfg: Config, url: str | None = None, echo: Callable[[str], None] | None = None):
+    def __init__(self, cfg: Config, url: str | None = None, echo: Callable[[str], None] | None = None,
+                 offline: bool = False):
         self.cfg = cfg
+        self.offline_only = offline                 # never connect to Lichess (local games and analysis only)
+        self.online = False                         # logged in to Lichess
         self.base_url = (url or cfg.get("url")).rstrip("/")
         self.web_url = self.base_url
         self.echo = echo
@@ -82,6 +85,8 @@ class BotManager:
         self.tunnel = None                          # Tunnel (public telemetry), see tunnel.py
         self._tunnel_task: asyncio.Task | None = None
         self.lag = LagTracker()                     # network lag per move, shared by all games
+        self.local_seq = 0                          # local games (local.py): ids local1, local2, ...
+        self.analysis = None                        # Analysis (analysis.py), created when first used
 
     # ---- logging -------------------------------------------------------------
     def _setup_file_log(self) -> None:
@@ -160,6 +165,26 @@ class BotManager:
                 self.tunnel = Tunnel(self, int(self.cfg.get("web.public_port")), str(self.cfg.get("web.tunnel_exe")),
                                      str(self.cfg.get("web.tunnel_gist") or ""))
                 self._tunnel_task = asyncio.create_task(self.tunnel.start(), name="tunnel")
+        self.tasks = [asyncio.create_task(self._housekeeping(), name="housekeeping")]
+        if self.offline_only:
+            self.log("warning", "offline mode: no Lichess connection - play the engine (`play`) or analyse "
+                                "positions (`analyze`) on this device")
+        elif not await self._login():
+            if self.stopped.is_set():
+                return
+            self.log("warning", f"cannot reach {self.base_url}: working offline (local games and analysis work); "
+                                f"trying again every minute")
+            self.tasks.append(asyncio.create_task(self._login_retry(), name="login"))
+        await self.stopped.wait()
+
+    async def _login_retry(self) -> None:
+        while not self.stopped.is_set():
+            await asyncio.sleep(60)
+            if await self._login():
+                return
+
+    async def _login(self) -> bool:
+        """Log in, resume running games, start the event stream. False when Lichess cannot be reached."""
         try:
             acct = await self.li.account()
         except LichessError as e:
@@ -168,16 +193,15 @@ class BotManager:
                 self.fatal = (f"token rejected by Lichess (HTTP 401): {token_shape(tok)}, from {src}. "
                               f"A personal token usually looks like lip_ + 20 letters/digits, created while "
                               f"logged in as the BOT account (python -m claudybot --check shows details)")
-            else:
-                self.fatal = f"cannot reach Lichess: {e}"
-            self.log("error", self.fatal)
-            self.stopped.set()
-            return
+                self.log("error", self.fatal)
+                self.stopped.set()
+                return False
+            self.log("debug", f"login failed: {e}")
+            return False
         except httpx.HTTPError as e:
-            self.fatal = f"cannot reach {self.base_url}: {e!r}"
-            self.log("error", self.fatal)
-            self.stopped.set()
-            return
+            self.log("debug", f"login failed: {e!r}")
+            return False
+        self.online = True
         self.account = acct
         self.username = acct.get("username", "?")
         self.user_id = acct.get("id", self.username.lower())
@@ -194,9 +218,8 @@ class BotManager:
                     self._start_game(gid, g)
         except (LichessError, httpx.HTTPError) as e:
             self.log("warning", f"could not list ongoing games: {e}")
-        self.tasks = [asyncio.create_task(self._event_loop(), name="events"),
-                      asyncio.create_task(self._housekeeping(), name="housekeeping")]
-        await self.stopped.wait()
+        self.tasks.append(asyncio.create_task(self._event_loop(), name="events"))
+        return True
 
     async def close(self) -> None:
         for g in list(self.games.values()):
@@ -211,6 +234,8 @@ class BotManager:
         for g in list(self.games.values()):
             if g.engine:
                 await g.engine.quit()
+        if self.analysis is not None:
+            await self.analysis.close()
         await self.li.close()
         if self.tunnel is not None:
             if self._tunnel_task and not self._tunnel_task.done():
@@ -219,13 +244,17 @@ class BotManager:
         if self.web is not None:
             await self.web.stop()
 
+    def online_games(self) -> list[GameSession]:
+        return [g for g in self.games.values() if not g.local]
+
     async def quit(self, now: bool = False) -> None:
-        if now or not self.games:
+        if now or not self.online_games():
             self.quitting = "now"
             self.stopped.set()
             return
         self.quitting = "graceful"
-        self.log("info", f"quitting after {len(self.games)} running game(s) finish; new challenges are declined")
+        self.log("info", f"quitting after {len(self.online_games())} running game(s) finish; new challenges are "
+                         f"declined")
         for ch in list(self.queue):
             await self.decline(ch.id, "later")
 
@@ -286,35 +315,40 @@ class BotManager:
             link = self.links.pop(gid, None)
             if link:
                 self._save_links()
-                who = (g.get("opponent") or {}).get("username") or "?"
+                who = (g.get("opponent") or {}).get("username") or "an anonymous player"
                 self.log("info", f"link {gid} ({link['tc']}) was taken by {who}")
             if gid not in self.games:
-                self._start_game(gid, g)
+                game = self._start_game(gid, g)
+                if game and link and link.get("elo"):
+                    game.limit_elo = int(link["elo"])      # applied when its engine starts
+                    game.preset_limit = True
+                    self.log("info", f"link game {gid}: rating limit {game.limit_elo}")
         elif t == "gameFinish":
             g = ev["game"]
             gid = g.get("gameId") or g.get("id")
             self.pending_accept.pop(gid, None)
 
-    def _start_game(self, gid: str, start_event: dict | None) -> None:
+    def _start_game(self, gid: str, start_event: dict | None) -> GameSession | None:
         if self.stopped.is_set():
-            return
+            return None
         g = GameSession(self, gid, start_event)
         self.games[gid] = g
         opp = (start_event or {}).get("opponent") or {}
         if str(opp.get("username") or "").startswith("BOT ") or opp.get("title") == "BOT":
             self.kind_hint[gid] = "bot"
-        self.log("info", f"game {gid} started vs {opp.get('username', '?')} ({self.web_url}/{gid})")
+        self.log("info", f"game {gid} started vs {opp.get('username') or 'anonymous'} ({self.web_url}/{gid})")
         g.start()
+        return g
 
     def on_game_end(self, g: GameSession) -> None:
         self.games.pop(g.id, None)
         self.kind_hint.pop(g.id, None)
         self.finished.appendleft(g)
-        if g.moves:
+        if g.moves and not g.local:
             self.results[g.outcome_for_me()] += 1
         if not self.games:
             self.last_idle_start = time.monotonic()
-        if self.quitting == "graceful" and not self.games:
+        if self.quitting == "graceful" and not self.online_games():
             self.log("info", "all games finished; quitting")
             self.stopped.set()
             return
@@ -438,15 +472,20 @@ class BotManager:
                       if isinstance(v, dict) and v.get("expires", 0) > now and v.get("server") == self.base_url}
 
     async def create_link(self, limit: int, inc: int, rated: bool, color: str = "random",
-                          hours: float = 24) -> dict:
+                          hours: float = 24, elo: int | None = None) -> dict:
         if speed_of(limit, inc) == "ultraBullet":
             raise ValueError("BOT accounts cannot play UltraBullet")
         hours = max(0.1, min(float(hours), 335.9))
         expires = time.time() + hours * 3600
+        if elo is not None and not 100 <= elo <= 3400:
+            raise ValueError("rating must be 100-3400")
+        if not self.online:
+            raise ValueError("not connected to Lichess")
         tc = fmt_tc(limit, inc)
         mode = "rated" if rated else "casual"
-        r = await self.li.open_challenge(limit=limit, increment=inc, rated=rated, name=f"{self.username} {tc} {mode}",
-                                         expires_ms=int(expires * 1000))
+        level = f" · plays at {elo}" if elo else ""
+        r = await self.li.open_challenge(limit=limit, increment=inc, rated=rated,
+                                         name=f"{self.username} {tc} {mode}{level}", expires_ms=int(expires * 1000))
         c = r.get("challenge", r)
         cid = c.get("id")
         if not cid:
@@ -460,11 +499,11 @@ class BotManager:
                 pass
             raise
         url = c.get("url") or f"{self.web_url}/{cid}"
-        link = {"id": cid, "url": url, "tc": tc, "rated": rated, "color": color,
+        link = {"id": cid, "url": url, "tc": tc, "rated": rated, "color": color, "elo": elo,
                 "created": time.time(), "expires": expires, "server": self.base_url}
         self.links[cid] = link
         self._save_links()
-        self.log("info", f"challenge link {tc} {mode}, we play {color}, open for {hours:g} h: {url}")
+        self.log("info", f"challenge link {tc} {mode}{level}, we play {color}, open for {hours:g} h: {url}")
         return link
 
     async def cancel_link(self, cid: str) -> bool:
@@ -478,6 +517,31 @@ class BotManager:
         except LichessError as e:
             self.log("warning", f"cancel link {cid}: {e}")
         return True
+
+    # ---- games on this device (local.py) and analysis (analysis.py) ---------------------------------------
+    def start_local(self, *, human_color: bool, limit_s: int | None, inc_s: int, elo: int | None,
+                    fen: str | None = None) -> GameSession:
+        from .local import LocalGame
+        self.local_seq += 1
+        gid = f"local{self.local_seq}"
+        while gid in self.games or any(f.id == gid for f in self.finished):
+            self.local_seq += 1
+            gid = f"local{self.local_seq}"
+        lc = self.cfg.get("local")
+        g = LocalGame(self, gid, human_color=human_color, limit_s=limit_s, inc_s=inc_s, elo=elo, fen=fen,
+                      movetime_ms=int(lc["movetime_ms"]), human_name=str(lc["name"] or "You"))
+        self.games[gid] = g
+        tc = "untimed" if limit_s is None else fmt_tc(limit_s, inc_s)
+        self.log("info", f"local game {gid}: you play {'white' if human_color else 'black'}, {tc}, engine "
+                         f"{'at ' + str(elo) if elo else 'at full strength'}")
+        g.start()
+        return g
+
+    def get_analysis(self):
+        if self.analysis is None:
+            from .analysis import Analysis
+            self.analysis = Analysis(self)
+        return self.analysis
 
     # ---- matchmaking ------------------------------------------------------------------
     async def matchmake(self, force: bool = False) -> None:
