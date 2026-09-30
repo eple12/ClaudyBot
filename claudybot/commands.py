@@ -27,12 +27,15 @@ HELP = [
     ("decline <n|id> [reason]", "decline (reasons: generic later tooFast tooSlow timeControl rated casual variant noBot onlyBot)"),
     ("challenge <user> <min+inc> [rated|casual] [white|black]", "challenge someone, e.g. challenge maia9 3+2 casual"),
     ("cancel <id|all>", "cancel our outgoing challenge(s)"),
+    ("link [min+inc] [rated|casual] [white|black|random] [<hours>h]",
+     "make a 'challenge a friend' link anyone can open to play us, e.g. link 5+3 casual 48h"),
+    ("links / link cancel <id|all>", "list / close our open links"),
     ("match on|off|now", "automatic matchmaking against online bots"),
     ("resign|abort|draw [n]", "resign / abort / offer-or-accept a draw in game n (default: watched game)"),
     ("offerdraw [n]", "offer a draw together with the next engine move"),
     ("diff [n] <rating|off>", "play game n at a rating limit (opponents use !diff <rating> in the chat)"),
     ("chat [n] [spectator] <text>", "write in the game chat"),
-    ("limit <n>", "maximum simultaneous games"),
+    ("limit <n> | limit bot|human <n|off>", "maximum simultaneous games (all / against bots / against humans)"),
     ("tc <min>-<max> [incmin-incmax]", "accepted base time in seconds, e.g. tc 60-900 0-10"),
     ("speeds <list>", "e.g. speeds bullet,blitz,rapid"),
     ("modes rated|casual|both", "accepted game modes"),
@@ -42,6 +45,7 @@ HELP = [
     ("save", "write the current settings to config.yml"),
     ("clear", "clear the log panel"),
     ("quit [now]", "quit after running games finish (or immediately)"),
+    ("restart [now]", "quit like `quit`, with exit code 75: the Android run.sh then updates and starts again"),
 ]
 
 
@@ -50,6 +54,7 @@ class UI:
     watched: str | None = None
 
     def watch(self, game: GameSession) -> None: ...
+    def copy(self, text: str) -> None: ...
     def overview(self) -> None: ...
     def clear_log(self) -> None: ...
 
@@ -69,6 +74,7 @@ class Commands:
             "accept": self.c_accept, "decline": self.c_decline,
             "challenge": self.c_challenge, "ch": self.c_challenge,
             "cancel": self.c_cancel,
+            "link": self.c_link, "links": self.c_links,
             "match": self.c_match, "mm": self.c_match,
             "resign": self.c_resign, "abort": self.c_abort, "draw": self.c_draw, "offerdraw": self.c_offerdraw,
             "diff": self.c_diff,
@@ -77,7 +83,7 @@ class Commands:
             "block": self.c_block, "unblock": self.c_unblock,
             "set": self.c_set, "get": self.c_config, "config": self.c_config,
             "save": self.c_save, "clear": self.c_clear,
-            "quit": self.c_quit, "exit": self.c_quit,
+            "quit": self.c_quit, "exit": self.c_quit, "restart": self.c_restart,
         }
 
     @property
@@ -176,8 +182,8 @@ class Commands:
         return [
             f"[b]{escape(m.username)}[/] on {m.base_url}  up {up // 3600}h{up % 3600 // 60:02d}m  "
             f"stream {'ok' if m.stream_ok else 'DOWN'}",
-            f"accepting: {'[red]paused[/]' if m.paused else '[green]yes[/]'}  games {len(m.games)}/{c['concurrency']}  "
-            f"queue {len(m.queue)}  outgoing {len(m.outgoing)}  matchmaking "
+            f"accepting: {'[red]paused[/]' if m.paused else '[green]yes[/]'}  games {m.slots_text()}  "
+            f"queue {len(m.queue)}  outgoing {len(m.outgoing)}  links {len(m.links)}  matchmaking "
             f"{'on' if m.cfg.get('matchmaking.enabled') else 'off'}",
             f"session results: +{r['win']} ={r['draw']} -{r['loss']}",
             f"accept: {','.join(c['speeds'])} | {','.join(c['modes'])} | base {c['min_base']}-{c['max_base']}s "
@@ -212,8 +218,9 @@ class Commands:
 
     async def c_accept(self, a: list[str]) -> list[str]:
         cid = self.challenge_id(a[0])
+        ch = next((c for c in self.mgr.queue if c.id == cid), None)
         self.mgr.queue = [c for c in self.mgr.queue if c.id != cid]
-        ok = await self.mgr.accept(cid)
+        ok = await self.mgr.accept(cid, "bot" if ch and ch.is_bot else "human")
         return [f"accepted {cid}" if ok else f"[red]could not accept {cid}[/]"]
 
     async def c_decline(self, a: list[str]) -> list[str]:
@@ -236,6 +243,51 @@ class Commands:
         for cid in ids:
             await self.mgr.cancel_challenge(cid)
         return [f"canceled {len(ids)} challenge(s)"]
+
+    async def c_link(self, a: list[str]) -> list[str]:
+        if a and a[0] in ("cancel", "close", "del"):
+            ids = list(self.mgr.links) if a[1:] and a[1] == "all" else [self._link_id(a[1])]
+            n = 0
+            for cid in ids:
+                n += await self.mgr.cancel_link(cid)
+            return [f"closed {n} link(s)"]
+        if a and a[0] in ("list", "ls"):
+            return await self.c_links([])
+        d = self.mgr.cfg.get("link")
+        tc, rated, color, hours = str(d["tc"]), bool(d["rated"]), str(d["color"]), float(d["hours"])
+        for x in a:
+            x = x.lower()
+            if "+" in x:
+                tc = x
+            elif x in ("rated", "casual"):
+                rated = x == "rated"
+            elif x in ("white", "black", "random"):
+                color = x
+            elif x.endswith(("h", "d")) and x[:-1].replace(".", "", 1).isdigit():
+                hours = float(x[:-1]) * (24 if x.endswith("d") else 1)
+            else:
+                raise ValueError(f"what is {x}? usage: link [min+inc] [rated|casual] [white|black|random] [<hours>h]")
+        limit, inc = parse_tc(tc)
+        ln = await self.mgr.create_link(limit, inc, rated, color, hours)
+        self.ui.copy(ln["url"])
+        return [f"[green]link ready[/] ({escape(ln['tc'])} {'rated' if rated else 'casual'}, we play {color}, "
+                f"open {hours:g} h): [b]{escape(ln['url'])}[/]"]
+
+    def _link_id(self, ref: str) -> str:
+        ids = list(self.mgr.links)
+        if ref.isdigit() and 1 <= int(ref) <= len(ids):
+            return ids[int(ref) - 1]
+        return next((i for i in ids if i.startswith(ref)), ref)
+
+    async def c_links(self, a: list[str]) -> list[str]:
+        if not self.mgr.links:
+            return ["no open links - make one with [b]link 5+3[/]"]
+        out = ["[b]open links[/]"]
+        for i, ln in enumerate(self.mgr.links.values(), 1):
+            left = max(0, ln["expires"] - time.time())
+            out.append(f"  [{i}] {escape(ln['url'])}  {escape(ln['tc'])} {'rated' if ln['rated'] else 'casual'} "
+                       f"we play {ln['color']}, {left / 3600:.1f} h left")
+        return out
 
     async def c_match(self, a: list[str]) -> list[str]:
         sub = a[0] if a else "status"
@@ -304,9 +356,14 @@ class Commands:
         return [f"({room}) {escape(' '.join(a))}"]
 
     async def c_limit(self, a: list[str]) -> list[str]:
-        self.mgr.cfg.set("challenge.concurrency", a[0])
+        if a and a[0].lower().rstrip("s") in ("bot", "human"):
+            kind = a[0].lower().rstrip("s")
+            v = a[1].lower() if len(a) > 1 else "off"
+            self.mgr.cfg.set(f"challenge.concurrency_{kind}", "-1" if v in ("off", "-", "all", "-1") else v)
+        elif a:
+            self.mgr.cfg.set("challenge.concurrency", a[0])
         await self.mgr._accept_from_queue()
-        return [f"max simultaneous games: {a[0]}"]
+        return [f"games {self.mgr.slots_text()}"]
 
     async def c_tc(self, a: list[str]) -> list[str]:
         lo, _, hi = a[0].partition("-")
@@ -361,6 +418,11 @@ class Commands:
     async def c_clear(self, a: list[str]) -> list[str]:
         self.ui.clear_log()
         return []
+
+    async def c_restart(self, a: list[str]) -> list[str]:
+        self.mgr.restart_requested = True
+        out = await self.c_quit(a)
+        return [line.replace("quitting", "restarting").replace("bye", "restarting") for line in out]
 
     async def c_quit(self, a: list[str]) -> list[str]:
         now = bool(a) and a[0] in ("now", "!", "force")

@@ -1,6 +1,8 @@
 """Textual console dashboard."""
 from __future__ import annotations
 
+import shutil
+import subprocess
 import time
 import traceback
 
@@ -86,6 +88,20 @@ class Hooks(UI):
     def clear_log(self) -> None:
         self.app.query_one("#log", RichLog).clear()
 
+    def copy(self, text: str) -> None:
+        """Put a link on the clipboard: OSC 52 (Windows Terminal and most others) and, in Termux,
+        termux-clipboard-set (Termux:API) when installed."""
+        try:
+            self.app.copy_to_clipboard(text)
+        except Exception:
+            pass
+        exe = shutil.which("termux-clipboard-set")
+        if exe:
+            try:
+                subprocess.run([exe], input=text.encode(), timeout=5, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
 
 class ClaudyApp(App):
     TITLE = "ClaudyBot"
@@ -127,6 +143,7 @@ class ClaudyApp(App):
         Binding("f4", "next_game", "Next game"),
         Binding("f5", "toggle_pause", "Pause/Resume"),
         Binding("f6", "flip", "Flip board"),
+        Binding("f7", "new_link", "Link"),
         Binding("escape", "overview", "Back", show=False),
         Binding("ctrl+q", "quit_app", "Quit", priority=True),
     ]
@@ -296,7 +313,14 @@ class ClaudyApp(App):
             t.append("⏸ PAUSED ", style="bold yellow")
         else:
             t.append("● ACCEPTING ", style="bold green")
-        t.append(f"│ games {len(m.games)}/{c['concurrency']} │ queue {len(m.queue)} │ out {len(m.outgoing)} │ ")
+        use = m.slot_usage()
+        t.append(f"│ games {sum(use.values())}/{c['concurrency']} ")
+        if m.split_slots():
+            t.append(f"(bot {use['bot']}/{m.slot_cap('bot')} human {use['human']}/{m.slot_cap('human')}) ",
+                     style="dim")
+        t.append(f"│ queue {len(m.queue)} │ out {len(m.outgoing)} │ ")
+        if m.links:
+            t.append(f"links {len(m.links)} │ ")
         t.append(f"MM {'on' if self.cfg.get('matchmaking.enabled') else 'off'} │ ")
         t.append("stream ok " if m.stream_ok else "stream DOWN ", style="" if m.stream_ok else "bold red")
         r = m.results
@@ -406,6 +430,13 @@ class ClaudyApp(App):
         for i, ch in enumerate(m.queue, 1):
             t.append(f"  [{i}] ", style="cyan")
             t.append(f"{ch.label()}\n")
+        if m.links:
+            t.append("\nOpen links\n", style="bold underline")
+            for i, ln in enumerate(m.links.values(), 1):
+                left = max(0.0, ln["expires"] - time.time()) / 3600
+                t.append(f"  [{i}] ", style="cyan")
+                t.append(f"{ln['url']}\n      {ln['tc']} {'rated' if ln['rated'] else 'casual'} {ln['color']} "
+                         f"{left:.1f}h\n")
         t.append("\nOutgoing challenges\n", style="bold underline")
         if not m.outgoing:
             t.append("  (none)\n", style="dim")
@@ -597,6 +628,14 @@ class ClaudyApp(App):
         log = self.query_one("#log", RichLog)
         for out in await self.commands.execute("help"):
             log.write(Text.from_markup(out))
+
+    def action_new_link(self) -> None:
+        """Fill the command line with a link command using the defaults (edit, then Enter)."""
+        d = self.cfg.get("link")
+        cmd = self.query_one("#cmd", CommandInput)
+        cmd.value = f"link {d['tc']} {'rated' if d['rated'] else 'casual'} {d['color']} {d['hours']:g}h"
+        cmd.cursor_position = len(cmd.value)
+        cmd.focus()
 
     async def action_toggle_pause(self) -> None:
         log = self.query_one("#log", RichLog)

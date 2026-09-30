@@ -29,7 +29,10 @@ DEFAULTS: dict[str, Any] = {
     "challenge": {
         "accept": True,               # False = paused (see paused_action)
         "paused_action": "decline",   # decline | ignore  (what to do with challenges while paused)
-        "concurrency": 2,             # simultaneous games
+        "concurrency": 2,             # simultaneous games (all opponents together)
+        "concurrency_bot": -1,        # at most this many of them against bots (-1 = no separate limit)
+        "concurrency_human": -1,      # at most this many against humans (-1 = no separate limit)
+                                      # e.g. concurrency 3 + concurrency_bot 2: one slot always stays free for humans
         "queue_size": 4,              # accepted-later challenges waiting for a free slot
         "variants": ["standard"],     # standard, fromPosition
         "speeds": ["bullet", "blitz", "rapid", "classical"],
@@ -76,6 +79,12 @@ DEFAULTS: dict[str, Any] = {
         "chat_commands": True,
         "pgn_dir": "games",
     },
+    "link": {                         # "challenge a friend" links (command `link`, dashboard button)
+        "tc": "5+3",                  # default clock (minutes+increment)
+        "rated": False,
+        "color": "random",            # our color: random | white | black
+        "hours": 24,                  # the link stays open this long (Lichess allows up to 2 weeks = 336 h)
+    },
     "strength": {                     # rating-limited games: the opponent types "!diff <rating>" in the chat
         "accept": True,               # accept such requests at all
         "modes": "casual",            # casual | rated | both
@@ -115,6 +124,7 @@ CHOICES = {
     "challenge.paused_action": ["decline", "ignore"],
     "challenge.sort": ["first", "best"],
     "ui.pieces": ["image", "sprites", "letters", "unicode"],
+    "link.color": ["random", "white", "black"],
     "strength.modes": ["casual", "rated", "both"],
     "strength.opponents": ["human", "bot", "both"],
     "log.level": ["debug", "info", "warning"],

@@ -3,7 +3,8 @@
 A Lichess BOT client for **any UCI engine**, with a console dashboard (Textual) and a browser dashboard:
 live boards of all games (Caliente pieces), per-game engine table / eval history / raw UCI I/O, runtime
 commands (pause, challenge filters, matchmaking, resign / draw, chat), pondering, network-lag compensation,
-rating-limited games on request (`!diff <rating>`), PGN export, and an offline mock Lichess server.
+rating-limited games on request (`!diff <rating>`), separate game slots for bots and humans, long-lived
+"challenge a friend" links (`link 5+3`), PGN export, and an offline mock Lichess server.
 
 * Live read-only mirror (GitHub Pages): <https://eple12.github.io/ClaudyBot/> — see *Live viewer* below.
 * Written for the [Claudy](https://github.com/eple12/ClaudyEngine) engine, but nothing in it is Claudy-specific:
@@ -70,6 +71,7 @@ demo.bat                             & rem 토큰 없이 가짜 Lichess 서버�
 * **맨 아래**: 이벤트 로그와 명령 입력줄. 명령 이름은 자동 완성되고, ↑/↓로 이전 명령을 불러옵니다.
 
 단축키: F1 도움말 · F2/Esc 개요 · F3/F4 이전/다음 게임 · F5 신청 일시정지/재개 · F6 보드 뒤집기 ·
+F7 도전 링크(기본값이 채워진 `link` 명령을 입력줄에 넣음, 고쳐서 Enter) ·
 Ctrl+Q 종료(게임이 진행 중이면 3초 안에 한 번 더 누르기)
 
 ## 브라우저 대시보드 (`--web`)
@@ -78,7 +80,8 @@ Ctrl+Q 종료(게임이 진행 중이면 3초 안에 한 번 더 누르기)
 (http://127.0.0.1:8080). 리체스 느낌의 어두운 화면에 Caliente 기물 그림 보드가 나오고, 수는 미끄러지듯
 움직입니다. 태블릿·폰 화면(세로/가로)에 맞춰 배치가 바뀝니다.
 
-* 개요: 게임 카드(보드, 시계, 평가 막대, 깊이/NPS, 생각 상태), 도전 대기열(수락/거절 버튼), 최근 결과
+* 개요: 게임 카드(보드, 시계, 평가 막대, 깊이/NPS, 생각 상태), 도전 대기열(수락/거절 버튼), 최근 결과,
+  도전 링크 만들기(시간·모드·봇 색·유지 시간을 고르고 Create link, 만든 링크는 Copy/Share/Close 버튼)
 * 상세: 큰 보드와 평가 막대, 탐색 표(cutechess식), 평가 그래프(눌러서 수마다 값 보기), 기보, 채팅 입력,
   엔진 입출력 원문, 뒤집기/무승부 제안/abort/기권 버튼
 * 아래 입력창은 콘솔 명령 그대로입니다. 위쪽 버튼으로 도전 수락 일시정지와 매치메이킹을 켜고 끕니다.
@@ -97,20 +100,53 @@ Ctrl+Q 종료(게임이 진행 중이면 3초 안에 한 번 더 누르기)
 | `accept <n\|id>` / `decline <n\|id> [사유]` | 대기열 신청을 필터와 상관없이 수락 / 거절 |
 | `challenge <user> 3+2 [rated\|casual] [white\|black]` | 직접 도전 신청 |
 | `cancel <id\|all>` | 보낸 도전 취소 |
+| `link [3+2] [rated\|casual] [white\|black\|random] [48h]` | 누구나 열어서 봇과 둘 수 있는 도전 링크 (아래 참고) |
+| `links` / `link cancel <n\|id\|all>` | 열려 있는 링크 목록 / 닫기 |
 | `match on\|off\|now` | 온라인 봇 자동 매치메이킹 |
 | `resign`, `abort`, `draw [n]` | 기권, 중단, 무승부 제안/수락 (n을 생략하면 지금 보고 있는 게임) |
 | `offerdraw [n]` | 다음 엔진 수와 함께 무승부 제안 |
 | `diff [n] <rating\|off>` | 게임 n을 그 레이팅 제한으로 두기 / 제한 해제 (다음 수부터) |
 | `chat [n] [spectator] <text>` | 채팅 |
-| `limit 3` | 동시 게임 수 |
+| `limit 3` / `limit bot 2` / `limit human off` | 동시 게임 수 / 그중 봇 상대 최대 / 사람 상대 제한 해제 |
 | `tc 60-900 0-10` | 받을 기본 시간 범위(초)와 증가 시간 범위 |
 | `speeds bullet,blitz` / `modes rated\|casual\|both` | 받을 속도 / 모드 |
 | `block <user>` / `unblock <user>` | 차단 목록 |
 | `set <키> <값>` / `config [접두어]` / `save` | 아무 설정이나 변경 / 보기 / config.yml에 저장 |
 | `quit` / `quit now` | 진행 중인 게임을 다 끝낸 뒤 종료 / 즉시 종료 |
+| `restart` / `restart now` | `quit`과 같지만 종료 코드 75로 끝냄. 안드로이드 `run.sh`는 이때 업데이트 후 다시 시작 |
 
 예시: `set challenge.min_rating 1800`, `set engine.options.Threads 6` (새 게임부터 적용),
 `set game.resign_enabled on`, `config matchmaking`.
+
+## 동시 게임 슬롯 (사람 / 봇)
+
+`challenge.concurrency`가 전체 동시 게임 수이고, 그 안에서 봇 상대와 사람 상대를 따로 제한할 수 있습니다.
+
+| 설정 | 기본값 | |
+|---|---|---|
+| `challenge.concurrency` | 2 | 전체 동시 게임 수 |
+| `challenge.concurrency_bot` | -1 | 봇 상대 최대 게임 수 (-1 = 따로 제한 없음) |
+| `challenge.concurrency_human` | -1 | 사람 상대 최대 게임 수 (-1 = 따로 제한 없음) |
+
+예: `concurrency: 3`, `concurrency_bot: 2`이면 봇끼리 2판이 돌고 있을 때 봇의 신청은 `later`로 거절하지만,
+나머지 한 자리는 사람에게 남겨 둡니다. 사람은 3자리를 모두 쓸 수 있습니다. 실행 중에는 `limit bot 2`,
+`limit human 1`, `limit bot off`로 바꿉니다. 상태줄과 대시보드에 `games 2/3 (bot 2/2 human 0/3)`처럼 표시됩니다.
+자리가 없을 때 사람의 신청은 대기열(`queue_size`)에 넣었다가 자리가 나면 받고, 봇의 신청은 바로 거절합니다.
+매치메이킹은 봇 자리가 비어 있을 때만 도전합니다.
+
+## 도전 링크 (친구에게 도전하기)
+
+`link 5+3`(또는 대시보드의 **Create link**, 콘솔의 F7)을 쓰면 `https://lichess.org/xxxxxxxx` 링크가 만들어지고,
+그 링크를 처음 여는 사람이 봇과 대국합니다. 리체스 웹에서 만든 친구 도전은 만든 사람의 창이 닫히면 곧
+사라지지만, 이 링크는 **정한 시간 동안 계속 열려 있습니다**(`link.hours`, 기본 24시간, 최대 2주).
+rated 링크는 로그인한 사람만 들어올 수 있습니다.
+
+* 원리: 리체스의 open challenge(`POST /api/challenge/open`)를 만들고 봇이 바로 첫 번째 자리에 앉습니다
+  (원하는 색 지정 가능). 두 번째로 여는 사람이 들어오면 게임이 시작됩니다.
+* 토큰에 `challenge:write` 권한이 없으면 링크를 익명으로 만든 뒤 봇이 자리에 앉으므로, `bot:play`만 있어도 됩니다.
+* 링크 게임은 슬롯 한도와 상관없이 시작됩니다(직접 만든 게임이므로). 울트라불릿은 BOT 계정이 둘 수 없습니다.
+* 기본값: `link.tc` 5+3, `link.rated` false, `link.color` random(봇의 색), `link.hours` 24.
+  열려 있는 링크는 `logs/links.json`에 기록되어 봇을 다시 켜도 목록에 남습니다.
 
 ## 레이팅 제한 (`!diff`)
 
@@ -135,7 +171,8 @@ Ctrl+Q 종료(게임이 진행 중이면 3초 안에 한 번 더 누르기)
 
 ## 동작 방식
 
-* 대국마다 엔진 프로세스를 하나씩 띄웁니다. `concurrency x Threads`가 코어 수를 넘지 않게 맞추세요.
+* 대국마다 엔진 프로세스를 하나씩 띄웁니다. `concurrency x Threads`가 코어 수를 넘지 않게 맞추세요
+  (도전 링크로 시작된 게임은 한도를 넘을 수 있습니다).
 * 시간: 서버가 보낸 시계에서 받은 뒤 흐른 시간을 빼서 `go wtime/btime/winc/binc`로 넘기고,
   네트워크 지연은 엔진의 `Move Overhead`가 흡수합니다. 첫 수는 `first_move_ms`로 둡니다.
 * 폰더: 내 수가 서버에 반영되면 엔진이 예상한 상대 수로 `go ponder`를 시작합니다. 예상이 맞으면

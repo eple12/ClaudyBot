@@ -308,8 +308,10 @@ function renderHeader(st) {
   setClass(dot, "bad", !st.stream);
   dot.title = st.stream ? "event stream connected" : "event stream down";
   const r = st.results;
+  const sl = st.slots || { total: [st.games.length, st.limit] };
   const chips = [
-    ["games", `<b>${st.games.length}</b>/${st.limit}`, ""],
+    ["games", `<b>${sl.total[0]}</b>/${sl.total[1]}` +
+      (sl.split ? ` <span class="dim">bot ${sl.bot[0]}/${sl.bot[1]} · human ${sl.human[0]}/${sl.human[1]}</span>` : ""), ""],
     ["queue", `<b>${st.queue.length}</b>`, "opt"],
     ["score", `<b class="green">+${r.win}</b> <b class="yellow">=${r.draw}</b> <b class="red">-${r.loss}</b>`, ""],
     ["up", uptime(st.up), "opt"],
@@ -415,6 +417,7 @@ function renderOverview(st) {
       q.appendChild(li);
     });
   }
+  renderLinks(st);
   const rc = $("#recent");
   const rk = JSON.stringify(st.recent);
   if (rc.dataset.k !== rk) {
@@ -432,6 +435,75 @@ function renderOverview(st) {
     }
   }
 }
+
+// ---- challenge links ---------------------------------------------------------------------------
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch { /* not a secure context */ }
+  const t = el("textarea");
+  t.value = text;
+  t.style.position = "fixed"; t.style.opacity = "0";
+  document.body.appendChild(t);
+  t.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { /* ignore */ }
+  t.remove();
+  return ok;
+}
+function linkLeft(s) {
+  const h = s / 3600;
+  return h >= 48 ? `${Math.round(h / 24)} days left` : h >= 1 ? `${h.toFixed(h < 10 ? 1 : 0)} h left` : `${Math.ceil(s / 60)} min left`;
+}
+let linkDefaultsSet = false;
+function renderLinks(st) {
+  if (!linkDefaultsSet && st.link_defaults) {
+    linkDefaultsSet = true;
+    const d = st.link_defaults, tc = $("#lk-tc");
+    if ([...tc.options].some(o => o.value === d.tc)) tc.value = d.tc;
+    else { tc.value = "custom"; $("#lk-custom").hidden = false; $("#lk-custom").value = d.tc; }
+    $("#lk-mode").value = d.rated ? "rated" : "casual";
+    $("#lk-color").value = d.color;
+    const hs = $("#lk-hours");
+    if (![...hs.options].some(o => Number(o.value) === Number(d.hours))) {
+      const o = el("option", "", `${d.hours} h`); o.value = String(d.hours);
+      hs.insertBefore(o, [...hs.options].find(x => Number(x.value) > Number(d.hours)) || null);
+    }
+    hs.value = String(d.hours);
+  }
+  const ul = $("#links");
+  const links = st.links || [];
+  const key = JSON.stringify(links.map(l => [l.id, Math.floor(l.left / 60)]));
+  if (ul.dataset.k === key) return;
+  ul.dataset.k = key;
+  ul.textContent = "";
+  if (!links.length) ul.appendChild(el("li", "none", "no open links"));
+  for (const l of links) {
+    const li = el("li");
+    li.appendChild(el("span", "", `${l.tc} ${l.rated ? "rated" : "casual"} · bot ${l.color}`));
+    li.appendChild(el("span", "left", linkLeft(l.left)));
+    const a = el("a", "url grow", l.url); a.href = l.url; a.target = "_blank"; a.rel = "noopener";
+    li.appendChild(a);
+    const c = el("button", "", "Copy");
+    c.onclick = async () => { const ok = await copyText(l.url); c.textContent = ok ? "Copied" : "Copy failed"; setTimeout(() => { c.textContent = "Copy"; }, 1500); };
+    li.appendChild(c);
+    if (navigator.share) {
+      const sh = el("button", "", "Share");
+      sh.onclick = () => navigator.share({ title: `Play ${st.user} (${l.tc})`, url: l.url }).catch(() => {});
+      li.appendChild(sh);
+    }
+    const x = el("button", "", "Close");
+    x.onclick = () => confirmRun(`Close the link ${l.url}?`, `link cancel ${l.id}`);
+    li.appendChild(x);
+    ul.appendChild(li);
+  }
+}
+$("#lk-tc").onchange = () => { $("#lk-custom").hidden = $("#lk-tc").value !== "custom"; if (!$("#lk-custom").hidden) $("#lk-custom").focus(); };
+$("#link-form").onsubmit = ev => {
+  ev.preventDefault();
+  let tc = $("#lk-tc").value;
+  if (tc === "custom") tc = $("#lk-custom").value.trim().replace(/\s+/g, "");
+  if (!/^\d+(\.\d+)?\+\d+$/.test(tc)) { alert("Time control like 3+2 (minutes+increment seconds)"); return; }
+  runCommand(`link ${tc} ${$("#lk-mode").value} ${$("#lk-color").value} ${$("#lk-hours").value}h`);
+};
 
 // ---- detail ----------------------------------------------------------------------------------
 const dBoard = new Board($("#d-board"), true);

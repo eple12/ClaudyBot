@@ -155,7 +155,9 @@ def main() -> int:
         finally:
             if mgr.tunnel is not None:
                 mgr.tunnel.kill_now()
-        return 0 if not mgr.fatal else 1
+        if mgr.fatal:
+            return 1
+        return 75 if mgr.restart_requested else 0
 
     from .tui import ClaudyApp
     graphics = detect_graphics()           # must run before Textual takes over the terminal
@@ -179,7 +181,7 @@ def main() -> int:
     if mgr.fatal:
         print(f"error: {mgr.fatal}", file=sys.stderr)
         return 1
-    return 0
+    return 75 if mgr.restart_requested else 0
 
 
 if __name__ == "__main__":

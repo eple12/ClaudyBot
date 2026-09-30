@@ -316,3 +316,13 @@ body:not(.log-open) #log { border-bottom: 0; }
   #cards { grid-template-columns: 1fr; }
   .brand span { display: none; }
 }
+
+/* challenge links */
+#link-form { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+#link-form select, #link-form input {
+  font: inherit; color: inherit; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 8px; min-height: 34px;
+}
+#link-form .primary { border-color: var(--green); background: var(--green-bg); color: var(--strong); }
+#links .url { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-all; }
+#links .left { color: var(--dim); font-size: 12px; }

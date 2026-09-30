@@ -122,8 +122,32 @@ class Lichess:
     def game_stream(self, game_id: str) -> AsyncIterator[dict]:
         return self.stream(f"/api/bot/game/stream/{game_id}")
 
-    async def accept(self, challenge_id: str) -> None:
-        await self.post(f"/api/challenge/{challenge_id}/accept", key="accept")
+    async def accept(self, challenge_id: str, color: str | None = None) -> None:
+        """`color` only for open challenges: take that seat (the first to accept an open challenge becomes
+        its challenger, the second one starts the game)."""
+        params = {"color": color} if color in ("white", "black") else None
+        await self.post(f"/api/challenge/{challenge_id}/accept", key="accept", params=params)
+
+    async def open_challenge(self, *, limit: int, increment: int, rated: bool, name: str = "",
+                             expires_ms: int | None = None) -> dict:
+        """Create an open challenge ("challenge a friend" link). Needs the challenge:write scope, which BOT
+        tokens often lack; an open challenge may also be created anonymously, so fall back to that."""
+        data = {"rated": "true" if rated else "false", "clock.limit": str(limit), "clock.increment": str(increment)}
+        if name:
+            data["name"] = name
+        if expires_ms:
+            data["expiresAt"] = str(expires_ms)
+        try:
+            return await self.post("/api/challenge/open", key="open", data=data, retries=1)
+        except LichessError as e:
+            if e.status not in (401, 403):
+                raise
+        async with httpx.AsyncClient(base_url=self.base_url, timeout=httpx.Timeout(10.0),
+                                     headers={"User-Agent": self.headers["User-Agent"]}) as anon:
+            r = await anon.post("/api/challenge/open", data=data)
+        if r.status_code >= 400:
+            raise LichessError(r.status_code, r.text, "/api/challenge/open")
+        return r.json()
 
     async def decline(self, challenge_id: str, reason: str = "generic") -> None:
         await self.post(f"/api/challenge/{challenge_id}/decline", key="decline", data={"reason": reason})

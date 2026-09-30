@@ -6,6 +6,7 @@ It implements the subset of the Bot API ClaudyBot uses (event stream, game strea
 chat, draw / abort / resign / claim-victory, online bots) with real clocks, flagging, repetition /
 50-move / material draws, and a few opponent personalities: normal, chatty (chats and offers draws),
 noshow (never moves: tests aborting) and leaver (disappears mid-game: tests claiming victory).
+Open challenges ("challenge a friend" links) are joined by a fake visitor after --link-join seconds.
 """
 from __future__ import annotations
 
@@ -268,6 +269,8 @@ class MockLichess:
         self.force_tc: tuple[int, int] | None = None   # --tc: every incoming challenge uses this clock
         self.challenges: dict[str, dict] = {}
         self.games: dict[str, MockGame] = {}
+        self.link_join = 8.0            # --link-join: a visitor takes an open link after this many seconds (0 = never)
+        self.open_scope = True          # --no-open-scope: the token may not create open challenges (HTTP 403)
 
     async def net_delay(self) -> None:
         """One network trip: half the round trip, with jitter and an occasional spike."""
@@ -319,9 +322,10 @@ class MockLichess:
         if ch and ch["status"] == "created":
             self.event({"type": "challengeCanceled", "challenge": ch})
 
-    def start_game(self, ch: dict) -> MockGame:
+    def start_game(self, ch: dict, bot_white: bool | None = None) -> MockGame:
         ch["status"] = "accepted"
-        bot_white = random.random() < 0.5
+        if bot_white is None:
+            bot_white = random.random() < 0.5
         g = MockGame(self, ch, bot_white, ch.get("behavior", "normal"))
         self.games[g.id] = g
         self.log(f"game {g.id} starts: bot plays {'white' if bot_white else 'black'} vs {g.opp['name']}")
@@ -349,8 +353,12 @@ class MockLichess:
             params = {k: v[0] for k, v in parse_qs(query).items()}
             form = {k: v[0] for k, v in parse_qs(body.decode()).items()} if body else {}
             form["_raw"] = body.decode(errors="replace")
-            if not headers.get("authorization", "").startswith("Bearer "):
+            authed = headers.get("authorization", "").startswith("Bearer ")
+            if not authed and not (method == "POST" and path == "/api/challenge/open"):
                 await self.send_json(writer, 401, {"error": "No such token"})
+                return
+            if authed and path == "/api/challenge/open" and not self.open_scope:
+                await self.send_json(writer, 403, {"error": "Missing scope challenge:write"})
                 return
             await self.route(method, path, params, form, writer)
         except (ConnectionError, asyncio.IncompleteReadError):
@@ -363,7 +371,8 @@ class MockLichess:
 
     async def send_json(self, w: asyncio.StreamWriter, status: int, obj) -> None:
         body = json.dumps(obj).encode()
-        reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 404: "Not Found"}.get(status, "OK")
+        reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+                  404: "Not Found"}.get(status, "OK")
         w.write(f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n"
                 f"Connection: close\r\n\r\n".encode() + body)
         await w.drain()
@@ -445,12 +454,34 @@ class MockLichess:
                 if q in g.subs:
                     g.subs.remove(q)
             return
+        if method == "POST" and path == "/api/challenge/open":
+            limit, inc = int(form.get("clock.limit", 300)), int(form.get("clock.increment", 3))
+            ch = {"id": gid(), "url": f"http://mock/{len(self.challenges)}", "status": "created", "challenger": None,
+                  "destUser": None, "variant": {"key": "standard", "name": "Standard", "short": "Std"},
+                  "rated": form.get("rated") == "true", "speed": speed_of(limit, inc),
+                  "timeControl": {"type": "clock", "limit": limit, "increment": inc, "show": f"{limit // 60}+{inc}"},
+                  "color": "random", "finalColor": "white", "perf": {"icon": "", "name": speed_of(limit, inc)},
+                  "direction": "out", "open": {}, "name": form.get("name", ""), "behavior": "normal",
+                  "expiresAt": int(form.get("expiresAt", 0) or 0)}
+            ch["url"] = f"http://127.0.0.1/{ch['id']}"
+            self.challenges[ch["id"]] = ch
+            self.log(f"open challenge {ch['id']} {limit}+{inc} created ({form.get('name', '')})")
+            return await self.send_json(w, 200, {**{k: v for k, v in ch.items() if k != "behavior"},
+                                                 "urlWhite": ch["url"] + "?color=white",
+                                                 "urlBlack": ch["url"] + "?color=black"})
         if method == "POST" and p[:2] == ["api", "challenge"]:
             if len(p) == 4:
                 cid, action = p[2], p[3]
                 ch = self.challenges.get(cid)
                 if not ch:
                     return await self.send_json(w, 404, {"error": "Challenge not found"})
+                if action == "accept" and "open" in ch and ch["challenger"] is None:
+                    ch["challenger"] = {"id": self.bot["id"], "name": self.bot["username"], "title": "BOT"}
+                    ch["seat"] = params.get("color")
+                    self.log(f"bot took its seat in {cid} ({ch['seat'] or 'random'})")
+                    if self.link_join > 0:
+                        asyncio.create_task(self._visit(ch))
+                    return await self.send_json(w, 200, ok)
                 if action == "accept":
                     self.challenges.pop(cid)
                     self.start_game(ch)
@@ -541,6 +572,18 @@ class MockLichess:
                 g.broadcast(g.state())
         asyncio.create_task(reply())
 
+    async def _visit(self, ch: dict) -> None:
+        """Someone opens the link and joins."""
+        await asyncio.sleep(self.link_join)
+        if self.challenges.get(ch["id"]) is not ch:
+            return
+        name, rating, _ = random.choice([x for x in FAKE_PLAYERS if not x[2]])
+        ch["destUser"] = {"id": name.lower(), "name": name, "title": None, "rating": rating}
+        self.challenges.pop(ch["id"])
+        seat = ch.get("seat")
+        self.log(f"{name} opened link {ch['id']}")
+        self.start_game(ch, None if not seat else seat == "white")
+
     async def _answer(self, ch: dict) -> None:
         await asyncio.sleep(2)
         if ch["id"] not in self.challenges:
@@ -566,6 +609,8 @@ async def amain(a) -> None:
     srv = MockLichess(Path(a.engine).resolve() if a.engine else None, a.every, a.max_games,
                       a.behavior.split(",") if a.behavior else None)
     srv.lag_ms = a.lag
+    srv.link_join = a.link_join
+    srv.open_scope = not a.no_open_scope
     srv.rated_prob = a.rated
     if a.tc:
         base, _, inc = a.tc.partition("+")
@@ -594,6 +639,9 @@ def main() -> None:
     ap.add_argument("--lag", type=float, default=0, help="simulated network round trip in ms (e.g. 300)")
     ap.add_argument("--rated", type=float, default=0.6, help="share of rated incoming challenges")
     ap.add_argument("--tc", default=None, help="force the clock of incoming challenges, seconds: e.g. 30+1")
+    ap.add_argument("--link-join", type=float, default=8, help="seconds until a visitor takes an open link (0 = never)")
+    ap.add_argument("--no-open-scope", action="store_true",
+                    help="refuse open challenges made with the token (the bot must fall back to anonymous)")
     a = ap.parse_args()
     if a.seed is not None:
         random.seed(a.seed)

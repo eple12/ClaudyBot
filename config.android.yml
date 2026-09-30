@@ -23,6 +23,8 @@ challenge:
   accept: true            # false = 일시정지 (명령: pause / resume)
   paused_action: decline  # 일시정지 중 신청 처리: decline(나중에 오라고 거절) | ignore(무응답)
   concurrency: 1          # 동시 게임 수 (명령: limit 2). 태블릿은 1이 가장 강함
+  concurrency_bot: -1     # 그중 봇 상대 최대 (-1 = 따로 제한 없음, 명령: limit bot 1)
+  concurrency_human: -1   # 그중 사람 상대 최대 (-1 = 따로 제한 없음)
   queue_size: 4           # 자리가 없을 때 대기열에 둘 신청 수
   variants: [standard]    # standard, fromPosition
   speeds: [bullet, blitz, rapid, classical]
@@ -68,6 +70,12 @@ game:
   goodbye: "Good game, {opponent}!"
   chat_commands: true     # !help !eval !name (관전 채팅에서만 !eval 공개)
   pgn_dir: games          # 끝난 게임을 날짜별 PGN으로 저장 (엔진 평가/깊이 주석 포함)
+
+link:                     # 도전 링크 기본값 (명령: link 5+3 casual 48h / 대시보드 Create link / 콘솔 F7)
+  tc: "5+3"
+  rated: false
+  color: random            # 봇의 색: random | white | black
+  hours: 24                # 링크가 열려 있는 시간 (최대 336 = 2주)
 
 strength:                 # 레이팅 제한 게임: 상대가 첫 수 전에 채팅에 "!diff 1500" (엔진이 그 레이팅으로 둠)
   accept: true            # 요청 받기

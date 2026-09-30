@@ -389,9 +389,21 @@ class WebServer:
                        "speed": q.speed, "rated": q.rated, "tc": f"{(q.limit or 0) / 60:g}+{q.increment or 0}"}
                       for q in m.queue],
             "outgoing": len(m.outgoing),
+            "slots": self.slots(),
+            "links": [{"id": ln["id"], "url": ln["url"], "tc": ln["tc"], "rated": ln["rated"], "color": ln["color"],
+                       "left": int(max(0, ln["expires"] - time.time()))} for ln in m.links.values()],
+            "link_defaults": m.cfg.get("link"),
             "log": log, "log_next": m.events_total,
             "pieces": str(m.cfg.get("ui.piece_set")), "cmds": self.cmd_names,
         }
+
+    def slots(self) -> dict:
+        m = self.mgr
+        use = m.slot_usage()
+        out = {"total": [sum(use.values()), int(m.cfg.get("challenge.concurrency"))], "split": m.split_slots()}
+        for k in ("bot", "human"):
+            out[k] = [use[k], m.slot_cap(k)]
+        return out
 
     async def command(self, line: str, watched: str | None) -> dict:
         ui = _RequestUI(watched)

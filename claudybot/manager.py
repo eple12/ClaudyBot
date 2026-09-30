@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import time
@@ -37,6 +38,14 @@ def parse_tc(tc: str) -> tuple[int, int]:
     return int(round(float(base) * 60)), int(inc or 0)
 
 
+def fmt_tc(limit: int, inc: int) -> str:
+    """(180, 2) -> '3+2'; (30, 0) -> '0.5+0'."""
+    return f"{limit / 60:g}+{inc}"
+
+
+KINDS = ("bot", "human")
+
+
 class BotManager:
     def __init__(self, cfg: Config, url: str | None = None, echo: Callable[[str], None] | None = None):
         self.cfg = cfg
@@ -53,7 +62,9 @@ class BotManager:
         self.games: dict[str, GameSession] = {}
         self.finished: deque[GameSession] = deque(maxlen=50)
         self.queue: list[Challenge] = []
-        self.pending_accept: dict[str, float] = {}
+        self.pending_accept: dict[str, tuple[float, str]] = {}   # challenge id -> (accepted at, "bot" | "human")
+        self.kind_hint: dict[str, str] = {}         # game id -> "bot" | "human", known from its challenge
+        self.links: dict[str, dict] = {}            # open "challenge a friend" links, see create_link
         self.outgoing: dict[str, tuple[Challenge, float]] = {}
         self.results: Counter = Counter()
         self.started = time.time()
@@ -63,6 +74,7 @@ class BotManager:
         self.last_mm_attempt = 0.0
         self.mm_avoid: dict[str, float] = {}
         self.quitting: str | None = None           # None | "graceful" | "now"
+        self.restart_requested = False             # exit with code 75: a wrapper (android/run.sh) updates + restarts
         self.stopped = asyncio.Event()
         self.fatal: str | None = None
         self.tasks: list[asyncio.Task] = []
@@ -98,6 +110,40 @@ class BotManager:
 
     def active_count(self) -> int:
         return len(self.games) + len(self.pending_accept)
+
+    # ---- slots: concurrency (all games) and optional separate limits for bots and humans ------------
+    def game_kind(self, g: GameSession) -> str:
+        if g.opponent_is_bot() or self.kind_hint.get(g.id) == "bot":
+            return "bot"
+        return "human"
+
+    def slot_cap(self, kind: str) -> int:
+        total = int(self.cfg.get("challenge.concurrency"))
+        cap = int(self.cfg.get(f"challenge.concurrency_{kind}"))
+        return total if cap < 0 else min(cap, total)
+
+    def slot_usage(self) -> dict[str, int]:
+        use = {k: 0 for k in KINDS}
+        for g in self.games.values():
+            use[self.game_kind(g)] += 1
+        for _, kind in self.pending_accept.values():
+            use[kind] += 1
+        return use
+
+    def has_slot(self, kind: str) -> bool:
+        use = self.slot_usage()
+        return sum(use.values()) < int(self.cfg.get("challenge.concurrency")) and use[kind] < self.slot_cap(kind)
+
+    def split_slots(self) -> bool:
+        return any(int(self.cfg.get(f"challenge.concurrency_{k}")) >= 0 for k in KINDS)
+
+    def slots_text(self) -> str:
+        """'2/3 (bots 2/2, humans 0/3)' - the per-kind part only when a separate limit is set."""
+        use = self.slot_usage()
+        out = f"{sum(use.values())}/{self.cfg.get('challenge.concurrency')}"
+        if self.split_slots():
+            out += f" (bots {use['bot']}/{self.slot_cap('bot')}, humans {use['human']}/{self.slot_cap('human')})"
+        return out
 
     def game_list(self) -> list[GameSession]:
         return list(self.games.values())
@@ -139,6 +185,7 @@ class BotManager:
         if acct.get("title") != "BOT":
             self.log("warning", f"{self.username} is not a BOT account - the Bot API will refuse to play")
         self.log("info", f"logged in as {self.username} on {self.base_url}")
+        self.load_links()
         try:
             for g in await self.li.playing():
                 gid = g.get("gameId") or g.get("id")
@@ -219,7 +266,11 @@ class BotManager:
             cid = ev["challenge"]["id"]
             self.queue = [c for c in self.queue if c.id != cid]
             self.outgoing.pop(cid, None)
-            self.log("info", f"challenge {cid} canceled")
+            if self.links.pop(cid, None):
+                self._save_links()
+                self.log("info", f"link {cid} closed")
+            else:
+                self.log("info", f"challenge {cid} canceled")
         elif t == "challengeDeclined":
             c = ev["challenge"]
             cid = c["id"]
@@ -232,6 +283,11 @@ class BotManager:
             gid = g.get("gameId") or g.get("id")
             self.pending_accept.pop(gid, None)
             self.outgoing.pop(gid, None)
+            link = self.links.pop(gid, None)
+            if link:
+                self._save_links()
+                who = (g.get("opponent") or {}).get("username") or "?"
+                self.log("info", f"link {gid} ({link['tc']}) was taken by {who}")
             if gid not in self.games:
                 self._start_game(gid, g)
         elif t == "gameFinish":
@@ -245,11 +301,14 @@ class BotManager:
         g = GameSession(self, gid, start_event)
         self.games[gid] = g
         opp = (start_event or {}).get("opponent") or {}
+        if str(opp.get("username") or "").startswith("BOT ") or opp.get("title") == "BOT":
+            self.kind_hint[gid] = "bot"
         self.log("info", f"game {gid} started vs {opp.get('username', '?')} ({self.web_url}/{gid})")
         g.start()
 
     def on_game_end(self, g: GameSession) -> None:
         self.games.pop(g.id, None)
+        self.kind_hint.pop(g.id, None)
         self.finished.appendleft(g)
         if g.moves:
             self.results[g.outcome_for_me()] += 1
@@ -264,6 +323,8 @@ class BotManager:
     # ---- challenges ----------------------------------------------------------------
     async def _on_challenge(self, c: dict) -> None:
         ch = Challenge.from_event(c, self.user_id)
+        if ch.id in self.links:
+            return
         if ch.direction == "out" or ch.challenger_id == self.user_id:
             self.outgoing[ch.id] = (ch, time.monotonic())
             return
@@ -283,25 +344,35 @@ class BotManager:
         if not ok:
             await self.decline(ch.id, reason)
             return
-        free = self.active_count() < self.cfg.get("challenge.concurrency")
-        if not free and len(self.queue) >= self.cfg.get("challenge.queue_size"):
-            await self.decline(ch.id, "later")
+        kind = "bot" if ch.is_bot else "human"
+        if self.slot_cap(kind) <= 0:
+            await self.decline(ch.id, "noBot" if ch.is_bot else "onlyBot")
             return
+        if not self.has_slot(kind):
+            # bots are told to come back later at once: a bot's challenge rarely waits long enough to be
+            # accepted from the queue, and the queue stays free for humans
+            if ch.is_bot or len(self.queue) >= self.cfg.get("challenge.queue_size"):
+                self.log("info", f"no free {kind} slot: games {self.slots_text()}")
+                await self.decline(ch.id, "later")
+                return
         self.queue.append(ch)
         if self.cfg.get("challenge.sort") == "best":
             self.queue.sort(key=lambda q: -(q.rating or 0))
         await self._accept_from_queue()
 
     async def _accept_from_queue(self) -> None:
-        while (self.queue and not self.paused and not self.quitting
-               and self.active_count() < self.cfg.get("challenge.concurrency")):
-            ch = self.queue.pop(0)
-            await self.accept(ch.id)
+        while self.queue and not self.paused and not self.quitting:
+            ch = next((q for q in self.queue if self.has_slot("bot" if q.is_bot else "human")), None)
+            if ch is None:
+                return
+            self.queue.remove(ch)
+            await self.accept(ch.id, "bot" if ch.is_bot else "human")
 
-    async def accept(self, cid: str) -> bool:
+    async def accept(self, cid: str, kind: str = "human") -> bool:
         try:
             await self.li.accept(cid)
-            self.pending_accept[cid] = time.monotonic()
+            self.pending_accept[cid] = (time.monotonic(), kind)
+            self.kind_hint[cid] = kind
             self.log("info", f"accepted challenge {cid}")
             return True
         except LichessError as e:
@@ -329,6 +400,7 @@ class BotManager:
         if "id" in c:
             ch = Challenge.from_event(c, self.user_id)
             self.outgoing[ch.id] = (ch, time.monotonic())
+            self.kind_hint[ch.id] = "bot" if ch.is_bot else "human"
             self.log("info", f"challenged {user} ({limit // 60 if limit >= 60 else limit / 60:g}+{inc}, "
                              f"{'rated' if rated else 'casual'}) id {ch.id}")
         else:
@@ -341,6 +413,71 @@ class BotManager:
             self.log("info", f"canceled our challenge {cid}")
         except LichessError as e:
             self.log("warning", f"cancel {cid} failed: {e}")
+
+    # ---- "challenge a friend" links -----------------------------------------------------------------
+    # An open challenge (POST /api/challenge/open) that we join at once as its first player: whoever opens
+    # the link afterwards plays us. Unlike a challenge made on the website it needs no open browser tab to
+    # stay alive; it stays open until it is taken, expires (link.hours, at most 2 weeks) or is canceled.
+    def _links_file(self):
+        return self.cfg.resolve(self.cfg.get("log.file")).parent / "links.json"
+
+    def _save_links(self) -> None:
+        try:
+            self._links_file().write_text(json.dumps(self.links, indent=1), encoding="utf-8")
+        except OSError:
+            pass
+
+    def load_links(self) -> None:
+        """Links outlive the bot: show the ones made by an earlier run (same server) again."""
+        try:
+            data = json.loads(self._links_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        now = time.time()
+        self.links = {k: v for k, v in data.items()
+                      if isinstance(v, dict) and v.get("expires", 0) > now and v.get("server") == self.base_url}
+
+    async def create_link(self, limit: int, inc: int, rated: bool, color: str = "random",
+                          hours: float = 24) -> dict:
+        if speed_of(limit, inc) == "ultraBullet":
+            raise ValueError("BOT accounts cannot play UltraBullet")
+        hours = max(0.1, min(float(hours), 335.9))
+        expires = time.time() + hours * 3600
+        tc = fmt_tc(limit, inc)
+        mode = "rated" if rated else "casual"
+        r = await self.li.open_challenge(limit=limit, increment=inc, rated=rated, name=f"{self.username} {tc} {mode}",
+                                         expires_ms=int(expires * 1000))
+        c = r.get("challenge", r)
+        cid = c.get("id")
+        if not cid:
+            raise ValueError(f"unexpected answer from Lichess: {str(r)[:200]}")
+        try:
+            await self.li.accept(cid, None if color == "random" else color)
+        except LichessError:
+            try:
+                await self.li.cancel_challenge(cid)
+            except LichessError:
+                pass
+            raise
+        url = c.get("url") or f"{self.web_url}/{cid}"
+        link = {"id": cid, "url": url, "tc": tc, "rated": rated, "color": color,
+                "created": time.time(), "expires": expires, "server": self.base_url}
+        self.links[cid] = link
+        self._save_links()
+        self.log("info", f"challenge link {tc} {mode}, we play {color}, open for {hours:g} h: {url}")
+        return link
+
+    async def cancel_link(self, cid: str) -> bool:
+        link = self.links.pop(cid, None)
+        self._save_links()
+        if not link:
+            return False
+        try:
+            await self.li.cancel_challenge(cid)
+            self.log("info", f"link {cid} canceled")
+        except LichessError as e:
+            self.log("warning", f"cancel link {cid}: {e}")
+        return True
 
     # ---- matchmaking ------------------------------------------------------------------
     async def matchmake(self, force: bool = False) -> None:
@@ -377,7 +514,7 @@ class BotManager:
         while not self.stopped.is_set():
             await asyncio.sleep(2.0)
             now = time.monotonic()
-            for cid, t in list(self.pending_accept.items()):
+            for cid, (t, _) in list(self.pending_accept.items()):
                 if now - t > 30:
                     self.pending_accept.pop(cid, None)
                     self.log("warning", f"accepted challenge {cid} never started")
@@ -388,8 +525,15 @@ class BotManager:
                     await self.cancel_challenge(cid)
             if self.queue and not self.paused:
                 await self._accept_from_queue()
+            expired = [cid for cid, ln in self.links.items() if ln["expires"] < time.time()]
+            for cid in expired:
+                self.links.pop(cid, None)
+                self.log("info", f"link {cid} expired")
+            if expired:
+                self._save_links()
             mm = self.cfg.get("matchmaking")
             if (mm["enabled"] and not self.paused and not self.quitting and self.active_count() == 0
+                    and self.has_slot("bot")
                     and not self.outgoing and not self.queue and self.stream_ok
                     and now - self.last_idle_start > mm["idle_seconds"]
                     and now - self.last_mm_attempt > max(30, mm["idle_seconds"] / 2)):
